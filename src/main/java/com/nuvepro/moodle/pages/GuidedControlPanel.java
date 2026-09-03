@@ -93,4 +93,55 @@ public class GuidedControlPanel extends BasePage {
         try { confirmModal(); } catch (Throwable ignored) {}
         page.waitForTimeout(1_500);
     }
+
+    public boolean submitPresentAndGetProgressRemoved() {
+        Locator submit = page.locator(SUBMIT);
+        Locator progress = page.locator("#performProgressCheck");
+        boolean submitShown = submit.count() > 0 && submit.first().isVisible();
+        boolean progressRemoved = progress.count() == 0 || !progress.first().isVisible();
+        return submitShown && progressRemoved;
+    }
+
+    public boolean consoleLabelsAndUtilitiesPresent() {
+        Locator instruction = page.locator("#openMissionBtn");
+        String title = instruction.count() > 0 ? instruction.first().getAttribute("title") : "";
+        boolean labels = title != null && title.toLowerCase().contains("instruction");
+        boolean timer = page.locator("#np-ap-cl-timer-cp, .time-remaining-text").count() > 0;
+        boolean support = page.locator("#np-ap-lab-tab-support-mailto").count() > 0;
+        return labels && timer && support;
+    }
+
+    public boolean credentialsPresent() {
+        Locator credentials = page.locator("#openAuthBtn");
+        return credentials.count() > 0 && credentials.first().isVisible()
+                && page.locator("body").innerText().toLowerCase().contains("lab credential");
+    }
+
+    /** Open a guarded action, assert a meaningful visible confirmation, then cancel it. */
+    public boolean hasMeaningfulConfirmation(String actionSelector) {
+        Locator action = page.locator(actionSelector);
+        if (action.count() == 0 || !action.first().isVisible() || !action.first().isEnabled()) return false;
+        action.first().click();
+        page.waitForTimeout(700);
+        Locator modals = page.locator("[data-region='modal-container'], .modal.show");
+        Locator modal = null;
+        for (int i = 0; i < modals.count(); i++) {
+            if (modals.nth(i).isVisible()) { modal = modals.nth(i); break; }
+        }
+        if (modal == null) return false;
+        String text = modal.innerText().trim().toLowerCase();
+        boolean meaningful = text.length() > 15
+                && (text.contains("submit") || text.contains("stop") || text.contains("attempt"));
+        Locator cancel = modal.locator("button:has-text('Cancel'), button:has-text('No'), "
+                + "button.close, [data-action='cancel']");
+        if (cancel.count() > 0) {
+            try { cancel.first().click(); } catch (RuntimeException ignored) {}
+        }
+        page.waitForTimeout(400);
+        return meaningful;
+    }
+
+    public boolean viewProgressPresent() {
+        return page.locator("a[href*='progress'], [title*='progress' i], .view-progress").count() > 0;
+    }
 }

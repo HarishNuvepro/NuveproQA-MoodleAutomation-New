@@ -10,3 +10,4 @@ reports/
 docs/*.backup*.xlsx
 docs/~$*
 ~$*.xlsx
+assessment.env

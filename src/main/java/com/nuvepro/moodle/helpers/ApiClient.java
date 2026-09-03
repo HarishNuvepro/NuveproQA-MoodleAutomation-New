@@ -21,8 +21,9 @@ import java.util.stream.Collectors;
 
 /**
  * Minimal Moodle Web Services (REST) client for TEST DATA SEEDING only.
- * Uses the "Automation Seeding" token (Settings.WS_TOKEN). Available functions:
- * core_user_create_users, enrol_manual_enrol_users (delete is NOT in the service).
+ * Uses the "Automation Seeding" token (Settings.WS_TOKEN). Available functions typically include:
+ * core_user_create_users, enrol_manual_enrol_users, enrol_manual_unenrol_users (optional),
+ * core_user_delete_users (optional — delete is best-effort).
  */
 public final class ApiClient {
     private ApiClient() {}
@@ -109,6 +110,43 @@ public final class ApiClient {
         p.put("enrolments[0][userid]", String.valueOf(userId));
         p.put("enrolments[0][courseid]", String.valueOf(courseId));
         call("enrol_manual_enrol_users", p);   // returns null/empty on success
+    }
+
+    /**
+     * Unenrol a user from a course (manual enrol plugin). Best-effort — requires
+     * {@code enrol_manual_unenrol_users} on the seeding token.
+     */
+    public static void unenrolUser(long userId, long courseId) {
+        Map<String, String> p = new LinkedHashMap<>();
+        p.put("enrolments[0][userid]", String.valueOf(userId));
+        p.put("enrolments[0][courseid]", String.valueOf(courseId));
+        call("enrol_manual_unenrol_users", p);
+    }
+
+    /** Read the plugin Practice Project results API through Moodle Web Services. */
+    public static String practiceProjectResult(String practiceProjectId, String userEmail,
+                                               boolean showTestCases) {
+        Map<String, String> p = new LinkedHashMap<>();
+        p.put("practiceProjectId", practiceProjectId);
+        p.put("practiceProjectType", "internal");
+        p.put("showTestCases", String.valueOf(showTestCases));
+        if (userEmail != null && !userEmail.isBlank()) p.put("userEmail", userEmail);
+        return call("mod_cloudlabs_get_guided_project_result", p);
+    }
+
+    /**
+     * Exact-match user id for an email, or null when no such account exists. Used by cleanup so it
+     * never deletes an account it merely happened to find on screen. Throws when the seeding token
+     * lacks {@code core_user_get_users}, so callers can fall back to a UI lookup.
+     */
+    public static Long findUserIdByEmail(String email) {
+        Map<String, String> p = new LinkedHashMap<>();
+        p.put("criteria[0][key]", "email");
+        p.put("criteria[0][value]", email);
+        String json = call("core_user_get_users", p);
+        if (json == null || !json.toLowerCase().contains(email.toLowerCase())) return null;
+        Matcher m = Pattern.compile("\"id\"\\s*:\\s*(\\d+)").matcher(json);
+        return m.find() ? Long.parseLong(m.group(1)) : null;
     }
 
     /** Delete a seeded user (best-effort cleanup; needs core_user_delete_users in the service). */

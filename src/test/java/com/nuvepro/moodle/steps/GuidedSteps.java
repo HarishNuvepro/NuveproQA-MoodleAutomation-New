@@ -11,6 +11,8 @@ import com.nuvepro.moodle.helpers.CloudLabsClient;
 import com.nuvepro.moodle.pages.GuidedControlPanel;
 import com.nuvepro.moodle.pages.GuidedLanding;
 import com.nuvepro.moodle.pages.ManageLabs;
+import com.nuvepro.moodle.pages.PracticeUserAttemptsPage;
+import com.nuvepro.moodle.pages.UserGuidedProjectsPage;
 
 import java.util.EnumSet;
 import io.cucumber.java.After;
@@ -35,14 +37,48 @@ public class GuidedSteps {
     private ApiClient.SeededUser student;
     private BrowserContext studentCtx;
     private Page studentPage;
+    private Integer configuredGuidedCmid;
 
     public GuidedSteps(TestContext ctx) {
         this.ctx = ctx;
     }
 
     private int guidedCmid() {
+        if (configuredGuidedCmid != null) return configuredGuidedCmid;
         if (Settings.GUIDED_CMID.isEmpty()) throw new SkipException("GUIDED_CMID not set");
         return Integer.parseInt(Settings.GUIDED_CMID);
+    }
+
+    @Given("the without-progress Practice Project fixture is configured")
+    public void withoutProgressFixtureIsConfigured() {
+        if (Settings.GUIDED_WITHOUT_PROGRESS_CMID.isBlank()) {
+            throw new SkipException("GUIDED_WITHOUT_PROGRESS_CMID not configured");
+        }
+        configuredGuidedCmid = Integer.parseInt(Settings.GUIDED_WITHOUT_PROGRESS_CMID);
+    }
+
+    @Given("the no-stop-button Practice Project fixture is configured")
+    public void noStopFixtureIsConfigured() {
+        if (Settings.GUIDED_NO_STOP_CMID.isBlank()) {
+            throw new SkipException("GUIDED_NO_STOP_CMID not configured");
+        }
+        configuredGuidedCmid = Integer.parseInt(Settings.GUIDED_NO_STOP_CMID);
+    }
+
+    @Given("the parallel-view Practice Project fixture is configured")
+    public void parallelFixtureIsConfigured() {
+        if (Settings.GUIDED_PARALLEL_CMID.isBlank()) {
+            throw new SkipException("GUIDED_PARALLEL_CMID not configured");
+        }
+        configuredGuidedCmid = Integer.parseInt(Settings.GUIDED_PARALLEL_CMID);
+    }
+
+    @Given("the timed Practice Project fixture is configured")
+    public void timedFixtureIsConfigured() {
+        if (Settings.GUIDED_TIMED_CMID.isBlank()) {
+            throw new SkipException("GUIDED_TIMED_CMID not configured");
+        }
+        configuredGuidedCmid = Integer.parseInt(Settings.GUIDED_TIMED_CMID);
     }
 
     @Given("I open the guided activity")
@@ -274,8 +310,14 @@ public class GuidedSteps {
     /** Wait for either the control panel or (fallback=false) return whether it appeared. */
     private boolean waitControlPanel(int maxSeconds) {
         GuidedControlPanel cp = scp();
+        int consecutive = 0;
         for (int i = 0; i < maxSeconds; i++) {
-            if (cp.isShown()) return true;
+            if (cp.isShown()) {
+                consecutive++;
+                if (consecutive >= 2) return true;
+            } else {
+                consecutive = 0;
+            }
             studentPage.waitForTimeout(1_000);
         }
         return false;
@@ -307,6 +349,48 @@ public class GuidedSteps {
         assertTrue(waitControlPanel(30), "guided control panel is not shown");
     }
 
+    @Then("the guided console has Submit and no Get Progress action")
+    public void theGuidedConsoleHasSubmitAndNoGetProgressAction() {
+        assertTrue(scp().submitPresentAndGetProgressRemoved(),
+                "Submit is missing or dormant Get Progress is visible");
+    }
+
+    @Then("the guided console shows instructions duration and support")
+    public void theGuidedConsoleShowsInstructionsDurationAndSupport() {
+        assertTrue(scp().consoleLabelsAndUtilitiesPresent(),
+                "guided console is missing Instructions, duration, or support");
+    }
+
+    @Then("the running guided console shows Lab Credentials")
+    public void theRunningGuidedConsoleShowsLabCredentials() {
+        assertTrue(scp().credentialsPresent(),
+                "Lab Credentials is not visible after the guided lab reached Running");
+    }
+
+    @Then("the Stop and Submit actions show meaningful confirmations")
+    public void theStopAndSubmitActionsShowMeaningfulConfirmations() {
+        assertTrue(scp().waitEnabled(GuidedControlPanel.STOP, 120),
+                "Stop did not become enabled before confirmation check");
+        assertTrue(scp().waitEnabled(GuidedControlPanel.SUBMIT, 120),
+                "Submit did not become enabled before confirmation check");
+        assertTrue(scp().hasMeaningfulConfirmation(GuidedControlPanel.STOP),
+                "Stop action has no meaningful confirmation");
+        assertTrue(scp().hasMeaningfulConfirmation(GuidedControlPanel.SUBMIT),
+                "Submit action has no meaningful confirmation");
+    }
+
+    @Then("the in-progress student can open Add Override")
+    public void theInProgressStudentCanOpenAddOverride() {
+        UserGuidedProjectsPage projects = new UserGuidedProjectsPage(ctx.page);
+        projects.open(sectionId);
+        assertTrue(projects.selectUserByEmail(student.email),
+                "in-progress Practice Project student is missing from participants");
+        assertTrue(!projects.addOverrideDisabled(),
+                "Add Override is disabled for an in-progress Practice Project user");
+        assertTrue(projects.clickAddOverride(),
+                "Add Override did not open for an in-progress Practice Project user");
+    }
+
     @Then("the guided lab reaches Running")
     public void theGuidedLabReachesRunning() {
         scp().startHandsOnLabIfNeeded();   // the CP does not auto-provision; click "Start hands-on lab"
@@ -331,6 +415,12 @@ public class GuidedSteps {
                 EnumSet.of(ManageLabs.LabState.RUNNING, ManageLabs.LabState.FAILED), 180, 5);
         assertTrue(st == ManageLabs.LabState.RUNNING,
                 "guided lab did not reach Running (state=" + st + ") - if FAILED, check the account pool");
+        // Register the provisioned Practice Project lab with the run-wide safety net. The scenario
+        // cleanup normally deletes it; these values are only used when that cleanup is interrupted.
+        GlobalHooks.labProvisioned = true;
+        GlobalHooks.teardownSectionId = sectionId;
+        GlobalHooks.teardownLabId = guidedLabId;
+        GlobalHooks.teardownStudentEmail = student.email;
     }
 
     @When("the student stops the guided lab")
@@ -428,6 +518,113 @@ public class GuidedSteps {
         assertTrue(back, "did not leave the control panel after submitting the attempt");
     }
 
+    @Then("the submitted guided attempt records evaluation and checkpoint results")
+    public void theSubmittedGuidedAttemptRecordsEvaluationAndCheckpointResults() {
+        UserGuidedProjectsPage projects = new UserGuidedProjectsPage(ctx.page);
+        projects.open(sectionId);
+        assertTrue(projects.selectUserByEmail(student.email),
+                "submitted student is missing from User Practice Project");
+        Page popup = projects.openUserAttemptsTab();
+        try {
+            PracticeUserAttemptsPage attempts = new PracticeUserAttemptsPage(popup);
+            popup.waitForTimeout(2_000);
+            assertTrue(attempts.attemptRows() > 0, "submitted attempt was not recorded");
+            assertTrue(attempts.tableHasAttemptDetailColumns(),
+                    "evaluation/checkpoint columns are missing from submitted attempt");
+            assertTrue(attempts.firstRowHasAttemptValues(),
+                    "evaluation/checkpoint result row is empty");
+        } finally {
+            try { popup.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    @Then("the completed with-progress attempt shows its progress icon")
+    public void theCompletedWithProgressAttemptShowsItsProgressIcon() {
+        GuidedLanding studentLanding = new GuidedLanding(studentPage);
+        studentLanding.open(guidedCmid());
+        studentPage.waitForTimeout(4_000);
+        assertTrue(studentLanding.completedAttemptProgressIconPresent(),
+                "completed with-progress attempt has no View Progress/More icon");
+    }
+
+    @Then("the guided Stop button is absent")
+    public void theGuidedStopButtonIsAbsent() {
+        Locator stop = studentPage.locator(GuidedControlPanel.STOP);
+        assertTrue(stop.count() == 0 || !stop.first().isVisible(),
+                "Stop Lab is visible when Show stop lab button is disabled");
+    }
+
+    @Then("the guided Stop button is present")
+    public void theGuidedStopButtonIsPresent() {
+        Locator stop = studentPage.locator(GuidedControlPanel.STOP);
+        assertTrue(stop.count() > 0 && stop.first().isVisible(),
+                "Stop Lab is absent when Show stop lab button is enabled");
+    }
+
+    @Then("the parallel-view lab renders separately from the instruction area")
+    public void theParallelViewLabRendersSeparately() {
+        boolean separate = studentPage.frames().size() > 1
+                || studentPage.context().pages().size() > 1
+                || studentPage.locator("iframe, .parallel-view, [class*='parallel' i]").count() > 0;
+        assertTrue(separate, "parallel-view fixture did not render a separate lab surface");
+    }
+
+    @Then("the without-progress attempt succeeds and hides progress actions")
+    public void theWithoutProgressAttemptSucceedsAndHidesProgressActions() {
+        UserGuidedProjectsPage projects = new UserGuidedProjectsPage(ctx.page);
+        projects.open(sectionId);
+        assertTrue(projects.selectUserByEmail(student.email),
+                "without-progress student is missing from participants");
+        Page popup = projects.openUserAttemptsTab();
+        try {
+            PracticeUserAttemptsPage attempts = new PracticeUserAttemptsPage(popup);
+            popup.waitForTimeout(2_000);
+            assertTrue(attempts.attemptRows() > 0, "without-progress submission was not recorded");
+            String row = attempts.firstRowText().toLowerCase();
+            assertTrue(row.contains("complete") || row.contains("success"),
+                    "without-progress attempt is not successful/completed: " + row);
+            assertTrue(attempts.progressActionsAbsent(),
+                    "progress/checkpoint actions are visible for without-progress activity");
+        } finally {
+            try { popup.close(); } catch (Throwable ignored) {}
+        }
+        GuidedLanding studentLanding = new GuidedLanding(studentPage);
+        studentLanding.open(guidedCmid());
+        studentPage.waitForTimeout(3_000);
+        assertTrue(!studentLanding.completedAttemptProgressIconPresent(),
+                "View Progress icon is visible for a without-progress attempt");
+    }
+
+    @Then("further attempts are blocked by the configured limit")
+    public void furtherAttemptsAreBlockedByConfiguredLimit() {
+        GuidedLanding studentLanding = new GuidedLanding(studentPage);
+        studentLanding.open(guidedCmid());
+        studentPage.waitForTimeout(3_000);
+        Locator next = studentPage.locator(GuidedLanding.NEW_ATTEMPT);
+        assertTrue(next.count() == 0 || !next.first().isVisible() || !next.first().isEnabled(),
+                "New Attempt remains enabled after the configured allowed-attempt limit");
+    }
+
+    @Then("the timed attempt completes and its configured lab action occurs")
+    public void theTimedAttemptCompletesAndConfiguredActionOccurs() {
+        boolean returned = false;
+        for (int i = 0; i < 180 && !returned; i++) {
+            try {
+                returned = studentPage.url().contains("view.php")
+                        || studentPage.locator(GuidedLanding.CONTAINER).count() > 0;
+            } catch (Throwable ignored) {}
+            if (!returned) studentPage.waitForTimeout(5_000);
+        }
+        assertTrue(returned, "timed Practice Project did not auto-submit back to landing");
+        if (guidedLabId != null && !guidedLabId.isBlank()) {
+            ManageLabs.LabState state = CloudLabsClient.waitForState(guidedLabId,
+                    EnumSet.of(ManageLabs.LabState.STOPPED, ManageLabs.LabState.DELETED,
+                            ManageLabs.LabState.FAILED), 600, 15);
+            assertTrue(state == ManageLabs.LabState.STOPPED || state == ManageLabs.LabState.DELETED,
+                    "timed lab action did not Stop/Delete the lab: " + state);
+        }
+    }
+
     @Then("the new-attempt cooldown is observed or already elapsed")
     public void theNewAttemptCooldownIsObservedOrElapsed() {
         new GuidedLanding(studentPage).open(guidedCmid());
@@ -469,15 +666,25 @@ public class GuidedSteps {
 
     @After("@guidedlab")
     public void cleanupGuidedLab() {
+        boolean labDeleted = guidedLabId == null || guidedLabId.isEmpty();
         if (studentCtx != null) { try { studentCtx.close(); } catch (Throwable ignored) {} studentCtx = null; }
         if (student != null) {
             try { ApiClient.deleteUser(student.id); } catch (Throwable ignored) {}   // cascade-deletes the lab
             student = null;
         }
         if (guidedLabId != null && !guidedLabId.isEmpty()) {
-            try { CloudLabsClient.waitForState(guidedLabId, EnumSet.of(ManageLabs.LabState.DELETED), 600, 15); }
+            try {
+                labDeleted = CloudLabsClient.waitForState(guidedLabId,
+                        EnumSet.of(ManageLabs.LabState.DELETED), 600, 15) == ManageLabs.LabState.DELETED;
+            }
             catch (Throwable e) { System.out.println("[GuidedLab] delete-wait after user cascade: " + e.getMessage()); }
             guidedLabId = null;
+        }
+        if (labDeleted) {
+            GlobalHooks.teardownSectionId = null;
+            GlobalHooks.teardownLabId = null;
+            GlobalHooks.teardownStudentEmail = null;
+            GlobalHooks.labProvisioned = false;
         }
     }
 }

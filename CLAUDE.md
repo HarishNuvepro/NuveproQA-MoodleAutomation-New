@@ -44,9 +44,12 @@ Running, Delete → removed), NOT merely that a control exists. Always exercise 
 assert the outcome (see "Exercise the action, don't just assert presence").
 
 **Augmented (gap-fill) cases:** add to the xlsx as new rows — id `CGAP-<AREA>-<n>` in the S.No column,
-Comment `Automation gap (derived ...) <date>`, other rows continue after the originals. **Back up the
-xlsx first** (`.backup-<date>.xlsx`), use a duplicate-guard, and touch ONLY that sheet. Automate them
-tagged (`@CGAP-<AREA>-<n>`) so traceability distinguishes original vs augmented.
+Comment `Automation gap (derived ...) <date>`, other rows continue after the originals. **Never write
+backup copies of the workbook** (no `.backup-<date>.xlsx` — QA's standing instruction): edit
+`docs/MoodleRegression_Testing_Kiwi new.xlsx` in place (note the space in the filename), use a
+duplicate-guard, and touch ONLY that sheet. `docs/MoodleRegression_Testing_Kiwi.xlsx` is the BACKUP
+of the previous state — never edit it.
+Automate them tagged (`@CGAP-<AREA>-<n>`) so traceability distinguishes original vs augmented.
 
 **Per-sheet workflow — DO IN THIS ORDER. Gap analysis + writing CGAP rows into the sheet is a GATE
 that comes BEFORE any automation scripting:**
@@ -194,6 +197,17 @@ residual UI read must wait for a real row (`open()` already does).
 - **Traceability + execution** (manual case → scenario → last result): `reports/traceability_execution.{html,csv}`,
   from `tools/traceability.py` (Python; merges `target/cucumber_fast.json` + `cucumber_slow.json` — save
   each run's `target/cucumber.json` to those names before regenerating). "Automated" = a scenario exists.
+- **Failure diagnostics (automatic).** On any scenario FAILURE, `steps/FailureCapture` (wired into the
+  `Hooks.@After`) dumps `target/failures/<scenario>/`: `screenshot.png`, `page.html` (DOM at failure),
+  `console.log` (browser console + page errors, collected via `TestContext` listeners), `trace.zip`
+  (Playwright trace — open with `npx playwright show-trace <zip>`), and `summary.txt`. The screenshot +
+  console are also attached to the Cucumber HTML report. A trace records for EVERY scenario but is kept
+  only on failure (discarded on pass), so green runs stay cheap. Capture is best-effort — it never masks
+  the real failure.
+- **Failed + skipped digest:** `python tools/failure_report.py` parses `target/cucumber.json` into
+  `reports/failures.{md,csv}` — one line per non-passing scenario with its @tag, status, failing/skipped
+  step, the reason (SkipException/assertion message), and a link to its `target/failures/` artifacts.
+  This is the fastest way to triage a run without re-executing it.
 
 ## When extending (Guided / Assessment / other sheets)
 - Mirror this pattern: tagged scenarios (`@GP-n`, `@ASMT-n`), Page Objects from the templates,
@@ -202,13 +216,32 @@ residual UI read must wait for a real row (`open()` already does).
   Page Objects `../automation/pages/*`). Reuse those.
 
 ## Coverage tracking — PER CASE, not per sheet (IMPORTANT)
-- Status lives in **`docs/MoodleRegression_Testing_Kiwi.xlsx`** (the master), per-case columns
+- Status lives in **`docs/MoodleRegression_Testing_Kiwi new.xlsx`** (the master), per-case columns
   `Automated` + `Automation_Ref`, summarised on the **`Automation_Coverage`** dashboard sheet. NOT in
   CLAUDE.md (this file is method/instructions), and never claim a whole "sheet automated".
+- **The two dashboard sheets are QA-OWNED — do NOT rewrite them.** `Regression_Dashboard` lists only
+ the modules worked so far (`Executed` = `Automated`=Yes AND `Case_Status` in Pass/Fail/Blocked;
+ `Not Automatable` = `Automated`=No; `Completion %` = Executed / (Total − Not Automatable)) and
+ `Automation_Coverage` summarises the `Automated` column per sheet. QA maintains their formulas and
+ calculates them outside this machine (no Excel licence here, so anything we compute must be a typed
+ value — and rewriting their layout has burned us twice).
+- **After ANY case change run `python tools/check_kiwi_dashboards.py`** — read-only: it recomputes
+ every dashboard number from the case rows and prints `ok` or `DRIFT` per row, exiting 1 on drift.
+ Report drift to QA (or ask before typing corrected numbers in).
+- **After ANY workbook save from openpyxl run `python tools/refresh_kiwi_dashboard.py`.** openpyxl
+ drops the cached result of EVERY formula it saves, which makes those cells render blank without an
+ Excel licence to recalculate — this script recomputes and re-injects the caches for
+  `Regression_Dashboard` + `Release_Regression_Plan`. It also owns the row order QA asked for on BOTH
+  sheets — Users, Upload users, All course page, Sandbox, Assessment, Lab Templates
+  (`TRAILING_MODULES`), then the plan's remaining modules
+ unchanged — where the dashboard's single merged Assessment row takes its Total from the plan sheet and
+ its Executed from the two assessment suites. The plan's formulas are regenerated per row (`I`/`J`/`L`
+ reference their own row), so a module can move without dragging stale references, and any module
+ sheet missing from the plan is added (`PLAN_ADDITIONS`) so TOTAL counts every sheet.
 - Vocabulary: **`Yes`** = a green test verifies THAT case (put the `feature @tag` in `Automation_Ref`);
   **`Partial`** = partly covered (say what's missing in the ref); **`Deviation`** = a fail-by-design
   test flagging a real defect; **`Deferred`** = derived `CGAP-*` gap not yet automated; **`No`** = not
-  automated (put the reason in the ref).
+  automated (put the reason in the ref); **blank** = not judged yet.
 - **Mark `Yes` ONLY where the test verifies that exact case — presence != behaviour.** Do not keyword-
   guess: it over-claims broad words ("add"/"assign"/"start") and under-claims when the case wording
   differs from the scenario. When you automate a new case, set its `Automated` row in the same change.

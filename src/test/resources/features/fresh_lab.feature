@@ -3,7 +3,7 @@
 # This avoids the shared-lab expiry problem (a long shared lab times out on the provider).
 # Run: mvnw test -Dcucumber.tags="@freshlab"
 
-Feature: Fresh per-user playground lab lifecycle
+Feature: Fresh per-user sandbox lab lifecycle
 
   @freshlab @provisioning
   Scenario: A fresh per-user lab can be created, extended, stopped and deleted

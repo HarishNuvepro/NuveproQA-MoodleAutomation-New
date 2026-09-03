@@ -39,11 +39,12 @@ Each module is a tag. Fast/no-cloud modules first; provisioning modules spin a r
 
 | Module | Tag | Command | Needs |
 |---|---|---|---|
-| **Moodle users** (create/login/suspend/email + derived gaps) | `@users` | `mvnw test "-Dcucumber.tags=@users"` | WS token |
-| Derived user gaps only | `@CGAP-U-1 or @CGAP-U-2 or ...` | `mvnw test "-Dcucumber.tags=@CGAP-U-1 or @CGAP-U-8"` | WS token |
+| **Moodle users** (create/login/suspend/email + derived gaps) | `@cat_users` / `@users` | `mvnw test -Pwatch "-Dcucumber.tags=@cat_users"` | WS token |
+| One user TC | `@U-user-1` … `@U-user-25` | `mvnw test -Pwatch "-Dcucumber.tags=@U-user-1"` | WS token |
+| Derived user gaps only (Kiwi) | `@CGAP-U-1 or @CGAP-U-2 or ...` | `mvnw test -Pwatch "-Dcucumber.tags=@CGAP-U-1 or @CGAP-U-8"` | WS token |
 | **Guided** (landing/admin/config presence) | `@guided` | `mvnw test "-Dcucumber.tags=@guided"` | `GUIDED_CMID` |
 | Playground **state actions** (start/stop/delete/sync) | `@stateactions` | `mvnw test "-Dcucumber.tags=@stateactions"` | CloudLabs |
-| Playground **console** read-only (usage/info/instructions/notes) | `@console` | `mvnw test "-Dcucumber.tags=@console"` | CloudLabs |
+| Sandbox **student user** (landing/console/notes/Access Lab) | `@SB-user-1` | `mvnw test -Pwatch "-Dcucumber.tags=@SB-user-1"` | CloudLabs |
 | **Student** self-service (start/stop own lab) | `@studentaction` | `mvnw test "-Dcucumber.tags=@studentaction"` | CloudLabs |
 | **Bulk** action on multiple labs | `@bulk` | `mvnw test "-Dcucumber.tags=@bulk"` | CloudLabs |
 | Fresh-lab lifecycle / expired-lab | `@freshlab` | `mvnw test "-Dcucumber.tags=@freshlab"` | CloudLabs |
@@ -64,8 +65,9 @@ Each module is a tag. Fast/no-cloud modules first; provisioning modules spin a r
 - **TestNG/Surefire summary:** `target/surefire-reports/emailable-report.html`
 - **Traceability & execution** (manual case → scenario → result, tied to the test-case
   spreadsheet): `reports/traceability_execution.html` / `.csv`
-  Generate after runs: `python tools/traceability.py` (merges `target/cucumber_fast.json`
-  + `cucumber_slow.json`; save each run's `target/cucumber.json` to those names).
+  Generate after runs: `python tools/traceability.py` (all Kiwi module sheets +
+  `target/cucumber_fast.json` + `cucumber_slow.json`; save each run's
+  `target/cucumber.json` to those names).
 - **Screenshots:** `reports/*.png`
 
 ## Layout

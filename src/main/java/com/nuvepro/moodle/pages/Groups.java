@@ -79,6 +79,17 @@ public class Groups extends BasePage {
         return page.locator("#groups option").filter(new Locator.FilterOptions().setHasText(name)).count();
     }
 
+    /** Numeric id of a course group selected by its exact visible name, or null. */
+    public String groupIdByName(int courseId, String name) {
+        navigate("/group/index.php?id=" + courseId);
+        page.waitForTimeout(1_200);
+        Locator option = page.locator("#groups option")
+                .filter(new Locator.FilterOptions().setHasText(name)).first();
+        if (option.count() == 0) return null;
+        String value = option.getAttribute("value");
+        return value == null || value.isBlank() ? null : value;
+    }
+
     /** Delete every group matching {@code name} (one per pass — deletion re-renders the list). */
     public void deleteGroups(int courseId, String name) {
         for (int i = 0; i < 8; i++) {

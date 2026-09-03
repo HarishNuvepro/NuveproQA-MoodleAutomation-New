@@ -2,25 +2,30 @@
 BDD traceability & execution report for the Java/Cucumber suite.
 
 Merges three sources into one per-case report:
-  1) Docs/Testcases/MoodleRegression_Testing.xlsx  -> ALL manual cases (denominator)
-  2) src/test/resources/features/*.feature          -> scenario @tags = CREATED/automated
-  3) target/cucumber.json                            -> EXECUTED scenarios + pass/fail/skip
+  1) docs/MoodleRegression_Testing_Kiwi new.xlsx  -> ALL manual cases (every module sheet)
+  2) src/test/resources/features/*.feature        -> scenario @tags
+  3) Regression_Dashboard + Case_Status           -> Executed / Passed
+     (same rule as the dashboard: Automated=Yes and Case_Status in
+     Pass/Fail/Failed/Blocked). Cucumber json is optional last-run detail only.
 
-The @<AREA>-<n> tag on each scenario is the link between a manual case and its script.
+The @tag in Automation_Ref is the link between a Kiwi row and its script.
 
-Run (after `mvn test` has produced target/cucumber.json):
-    <python-with-openpyxl> tools/traceability.py
+Run:
+    python tools/traceability.py
 Outputs (in reports/):
     traceability_execution.csv
     traceability_execution.html
 """
 from __future__ import annotations
+
 import csv
 import html
 import json
 import re
-from pathlib import Path
 from collections import defaultdict
+from datetime import date
+from pathlib import Path
+
 from openpyxl import load_workbook
 
 JAVA_ROOT = Path(__file__).resolve().parents[1]
@@ -29,109 +34,152 @@ TARGET = JAVA_ROOT / "target"
 # Merge results from every saved run (fast + slow) so the report reflects all executions.
 CUKE_JSONS = ["cucumber_fast.json", "cucumber_slow.json", "cucumber.json"]
 OUT_DIR = JAVA_ROOT / "reports"
-XLSX = Path(r"D:\Projects\Nuvepro\Moodle\Docs\Testcases\MoodleRegression_Testing.xlsx")
-GENERATED = "2026-07-01"
+XLSX = JAVA_ROOT / "docs" / "MoodleRegression_Testing_Kiwi new.xlsx"
 
-SHEET_PREFIX = {
-    "Moodle_users": "USR", "Moodle_Assessment_Labs": "ASMT", "Moodle_Playground_Labs": "PG",
-    "Moodle_Guided_Labs": "GP", "Moodle_Lab_Templates": "LT", "Groups_Testcases": "GRP",
-    "Moodle_Roles": "ROLE", "Moodle_Tags": "TAG", "Moodle_Logs": "LOG",
-    "LoadBalacer_Moodle": "LB", "Moodle_Reports": "RPT", "Moodle_cron": "CRON",
-    "Moodle-Cloudlabs Integration": "INTG", "All Course Page ": "ACP",
-    "Moodle settings": "SET", "Activities": "ACT",
+SKIP_SHEETS = {
+    "Regression_Dashboard",
+    "Release_Regression_Plan",
+    "Automation_Coverage",
 }
-AREA_NAME = {v: k.strip() for k, v in SHEET_PREFIX.items()}
-ID_RE = re.compile(r"([A-Z]{2,5}-\d+[a-z]?)", re.IGNORECASE)
+DASHBOARD = "Regression_Dashboard"
+# Same statuses the dashboard COUNTIFS uses for Executed.
+DASH_RUN = {"pass", "fail", "failed", "blocked"}
+ASSESSMENT_SHEET = "Moodle_Assessment_Labs"
+
+# Feature-level / runner tags — not a case id.
+META_TAGS = {
+    "provisioning", "freshlab", "guided", "guidedlab", "assessment-cleanup",
+    "cat_userflow", "sandbox", "slow", "watch", "labactions", "users",
+    "assessment", "playground", "cloudlabs", "wip", "skip",
+}
+
+# Current run tags: @U-user-1, @UU-S1, @ACP-S1, @SB-create-1, @A-create-full,
+# @A55, @PP-2, @LT-1, @CGAP-A-USER-1, …
+TAG_RE = re.compile(r"@([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*)")
+
+TITLE_COL, SUMMARY_COL, PRIORITY_COL = 0, 1, 5
+STATUS_COL, AUTOMATED_COL, REF_COL = 6, 10, 11
 
 
-def base(cid: str) -> str:
-    return re.sub(r"^([A-Z]{2,5}-\d+)[A-Za-z]$", r"\1", cid.upper())
+def sheet_label(name: str) -> str:
+    return name.strip()
 
 
-def _norm(h):
-    return str(h).strip().lower() if h is not None else ""
+def tags_in(text: str) -> list[str]:
+    found = []
+    seen = set()
+    for raw in TAG_RE.findall(text or ""):
+        tag = raw.strip()
+        if not tag or tag.lower() in META_TAGS:
+            continue
+        key = tag.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(tag)
+    return found
 
 
-def _col(headers, *names):
-    low = [_norm(h) for h in headers]
-    for n in names:
-        for i, h in enumerate(low):
-            if h == n.lower():
-                return i
-    for n in names:
-        for i, h in enumerate(low):
-            if n.lower() in h:
-                return i
-    return None
+def norm_tag(tag: str) -> str:
+    return tag.lstrip("@").upper()
 
 
-def read_manual_cases():
+def read_manual_cases() -> list[dict]:
+    if not XLSX.exists():
+        raise SystemExit(f"missing workbook: {XLSX}")
     wb = load_workbook(XLSX, read_only=True, data_only=True)
     cases = []
-    for sheet, area in SHEET_PREFIX.items():
-        if sheet not in wb.sheetnames:
+    for sheet in wb.sheetnames:
+        if sheet in SKIP_SHEETS:
             continue
         rows = list(wb[sheet].iter_rows(values_only=True))
         if not rows:
             continue
-        headers = rows[0]
-        c_sno = _col(headers, "s.no", "sl.no", "s. no")
-        c_title = _col(headers, "summary", "test cases", "testcases", "name")
-        c_imp = _col(headers, "importance")
-
-        def title_of(r):
-            v = r[c_title] if c_title is not None and c_title < len(r) else None
-            return str(v).strip() if v is not None else ""
-
-        def sno_of(r):
-            return r[c_sno] if c_sno is not None and c_sno < len(r) else None
-
-        title_rows = [r for r in rows[1:] if title_of(r)]
-        numbered = sum(1 for r in title_rows if isinstance(sno_of(r), (int, float)))
-        use_sno = title_rows and numbered >= max(1, len(title_rows) // 2)
-        running = 0
-        for r in title_rows:
-            running += 1
-            sno = sno_of(r)
-            num = int(sno) if (use_sno and isinstance(sno, (int, float))) else running
+        area = sheet_label(sheet)
+        for idx, row in enumerate(rows[1:], start=2):
+            title = str(row[TITLE_COL]).strip() if TITLE_COL < len(row) and row[TITLE_COL] else ""
+            summary = str(row[SUMMARY_COL]).strip() if SUMMARY_COL < len(row) and row[SUMMARY_COL] else ""
+            if not title and not summary:
+                continue
+            automated = str(row[AUTOMATED_COL]).strip() if AUTOMATED_COL < len(row) and row[AUTOMATED_COL] else ""
+            ref = str(row[REF_COL]).strip() if REF_COL < len(row) and row[REF_COL] else ""
             cases.append({
-                "id": f"{area}-{num}", "area": area, "num": num,
-                "title": title_of(r)[:140],
-                "importance": (str(r[c_imp]).strip() if c_imp is not None and c_imp < len(r) and r[c_imp] else ""),
+                "id": title or f"{area}-row{idx}",
+                "area": area,
+                "row": idx,
+                "title": (summary or title)[:160],
+                "importance": (str(row[PRIORITY_COL]).strip()
+                               if PRIORITY_COL < len(row) and row[PRIORITY_COL] else ""),
+                "case_status": (str(row[STATUS_COL]).strip()
+                                if STATUS_COL < len(row) and row[STATUS_COL] else ""),
+                "automated": automated,
+                "ref": ref,
+                "tags": tags_in(ref),
             })
     wb.close()
     return cases
 
 
-def scan_features():
-    """{base_id: {'scenario': name, 'feature': filename}} from @tags on scenarios."""
-    created = {}
+def scan_features() -> dict[str, dict]:
+    """{NORM_TAG: {'scenario': name, 'feature': filename, 'tag': original}}."""
+    created: dict[str, dict] = {}
     if not FEATURES_DIR.exists():
         return created
-    for f in sorted(FEATURES_DIR.glob("*.feature")):
-        pending = []
-        for line in f.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for path in sorted(FEATURES_DIR.glob("*.feature")):
+        pending: list[str] = []
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
             s = line.strip()
             if s.startswith("@"):
-                pending += [t for t in ID_RE.findall(s)]
+                pending.extend(tags_in(s))
             elif s.lower().startswith("scenario"):
                 name = s.split(":", 1)[1].strip() if ":" in s else s
-                for t in pending:
-                    created[base(t)] = {"scenario": name, "feature": f.name}
+                for tag in pending:
+                    created[norm_tag(tag)] = {
+                        "scenario": name, "feature": path.name, "tag": tag,
+                    }
                 pending = []
             elif s.lower().startswith("feature"):
                 pending = []
     return created
 
 
-def read_execution():
-    """{base_id: 'passed'|'failed'|'skipped'} merged across all saved cucumber json runs."""
-    out = {}
+def load_cuke_json(path: Path) -> list:
+    """Load Cucumber json; tolerate concatenated arrays from merged runs."""
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, list) else [data]
+    except json.JSONDecodeError:
+        out: list = []
+        dec = json.JSONDecoder()
+        idx = 0
+        while idx < len(text):
+            while idx < len(text) and text[idx] in " \t\n\r":
+                idx += 1
+            if idx >= len(text):
+                break
+            try:
+                chunk, idx = dec.raw_decode(text, idx)
+            except json.JSONDecodeError:
+                break
+            if isinstance(chunk, list):
+                out.extend(chunk)
+            else:
+                out.append(chunk)
+        return out
+
+
+def read_execution() -> dict[str, str]:
+    """{NORM_TAG: passed|failed|skipped} merged across saved cucumber json runs."""
+    out: dict[str, str] = {}
+    rank = {"failed": 3, "skipped": 2, "passed": 1}
     for name in CUKE_JSONS:
-        p = TARGET / name
-        if not p.exists():
+        path = TARGET / name
+        if not path.exists():
             continue
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = load_cuke_json(path)
         for feat in data:
             for el in feat.get("elements", []):
                 if el.get("type") != "scenario":
@@ -144,85 +192,216 @@ def read_execution():
                 else:
                     outcome = "passed"
                 for tag in el.get("tags", []):
-                    tname = tag.get("name", "").lstrip("@")
-                    if ID_RE.fullmatch(tname):
-                        out[base(tname)] = outcome
+                    tname = tag.get("name", "")
+                    for parsed in tags_in(tname if tname.startswith("@") else f"@{tname}"):
+                        key = norm_tag(parsed)
+                        if rank.get(outcome, 0) >= rank.get(out.get(key, ""), 0):
+                            out[key] = outcome
     return out
 
 
-def main():
+def pick_result(tags: list[str], executed: dict[str, str]) -> str:
+    rank = {"failed": 3, "skipped": 2, "passed": 1, "": 0}
+    best = ""
+    for tag in tags:
+        outcome = executed.get(norm_tag(tag), "")
+        if rank[outcome] > rank[best]:
+            best = outcome
+    return best
+
+
+def is_yes(value: str) -> bool:
+    return value.strip().lower() == "yes"
+
+
+def is_marked_auto(value: str) -> bool:
+    return value.strip().lower() in {"yes", "partial", "deviation"}
+
+
+def status_key(value: str) -> str:
+    s = (value or "").strip().lower()
+    if s == "pass":
+        return "passed"
+    if s in {"fail", "failed"}:
+        return "failed"
+    if s == "blocked":
+        return "blocked"
+    if s in {"skip", "skipped"}:
+        return "skipped"
+    return ""
+
+
+def read_dashboard_executed() -> dict[str, int]:
+    """Regression_Dashboard Executed, keyed by case-sheet label."""
+    if not XLSX.exists():
+        return {}
+    wb = load_workbook(XLSX, read_only=True, data_only=True)
+    if DASHBOARD not in wb.sheetnames:
+        wb.close()
+        return {}
+    out: dict[str, int] = {}
+    for row in wb[DASHBOARD].iter_rows(min_row=5, min_col=2, max_col=5, values_only=True):
+        label = str(row[0] or "").strip()
+        if not label or label.upper() == "TOTAL":
+            continue
+        executed = row[3]
+        if not isinstance(executed, (int, float)):
+            continue
+        key = ASSESSMENT_SHEET if label.lower().startswith("assessment") else label
+        out[key] = int(executed)
+    wb.close()
+    return out
+
+
+def main() -> None:
     OUT_DIR.mkdir(exist_ok=True)
     cases = read_manual_cases()
     created = scan_features()
-    executed = read_execution()
+    cuke = read_execution()
+    dash_exec = read_dashboard_executed()
 
     for c in cases:
-        d = created.get(c["id"])
-        c["automated"] = "yes" if d else "no"
-        c["scenario"] = d["scenario"] if d else ""
-        c["feature"] = d["feature"] if d else ""
-        c["result"] = executed.get(c["id"], "")
-        c["executed"] = "yes" if c["id"] in executed else "no"
+        tags = c["tags"]
+        hit = next((created.get(norm_tag(t)) for t in tags if norm_tag(t) in created), None)
+        if hit is None and tags:
+            # Feature exists under a Covered-by / Automation_Ref tag even if kiwi Automated is No.
+            hit = created.get(norm_tag(tags[0]))
+        c["scenario"] = hit["scenario"] if hit else ""
+        c["feature"] = hit["feature"] if hit else ""
+        c["run_tag"] = (hit["tag"] if hit else (tags[0] if tags else ""))
+        c["result"] = status_key(c["case_status"])
+        c["cuke_result"] = pick_result(tags, cuke)
+        c["executed"] = "yes" if is_yes(c["automated"]) and c["case_status"].strip().lower() in DASH_RUN else "no"
+        if not c["feature"] and c["ref"]:
+            m = re.search(r"([\w.-]+\.feature)", c["ref"])
+            if m:
+                c["feature"] = m.group(1)
 
-    # CSV
+    fieldnames = ["id", "area", "importance", "automated", "case_status",
+                  "executed", "result", "cuke_result", "run_tag", "scenario",
+                  "feature", "title"]
     with (OUT_DIR / "traceability_execution.csv").open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["id", "area", "importance", "automated",
-                                          "executed", "result", "scenario", "feature", "title"],
-                           extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
-        for c in sorted(cases, key=lambda x: (x["area"], x["num"])):
+        for c in cases:
             w.writerow(c)
 
-    per = defaultdict(lambda: {"total": 0, "auto": 0, "exec": 0, "pass": 0})
+    per: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"total": 0, "auto": 0, "exec": 0, "pass": 0, "not_auto": 0})
     for c in cases:
         a = per[c["area"]]
         a["total"] += 1
-        if c["automated"] == "yes":
+        if is_yes(c["automated"]):
             a["auto"] += 1
+        if c["automated"].strip().lower() == "no":
+            a["not_auto"] += 1
         if c["executed"] == "yes":
             a["exec"] += 1
-        if c["result"] == "passed":
+        if is_yes(c["automated"]) and c["case_status"].strip().lower() == "pass":
             a["pass"] += 1
+    # Dashboard Executed is the source of truth for modules it lists
+    # (Assessment uses the merged-suite count, not every Yes row).
+    for area, executed in dash_exec.items():
+        if area in per:
+            per[area]["exec"] = executed
+
     tot = sum(a["total"] for a in per.values())
     auto = sum(a["auto"] for a in per.values())
     ex = sum(a["exec"] for a in per.values())
     ps = sum(a["pass"] for a in per.values())
+    not_auto = sum(a["not_auto"] for a in per.values())
+    dash_areas = [a for a in dash_exec if a in per]
 
-    color = {"passed": "#1a7f37", "failed": "#cf222e", "skipped": "#9a6700", "": "#8b949e"}
-    label = {"passed": "PASS", "failed": "FAIL", "skipped": "SKIP", "": "not run"}
+    color = {
+        "passed": "#1a7f37", "failed": "#cf222e", "blocked": "#8250df",
+        "skipped": "#9a6700", "": "#8b949e",
+    }
+    label = {
+        "passed": "PASS", "failed": "FAIL", "blocked": "BLOCKED",
+        "skipped": "SKIP", "": "not run",
+    }
 
     def esc(s):
         return html.escape(str(s))
 
+    areas = dash_areas + [a for a in per if a not in dash_exec]
     summary = "".join(
-        f"<tr><td>{a}</td><td>{esc(AREA_NAME.get(a,''))}</td><td class=r>{per[a]['auto']}</td>"
-        f"<td class=r>{per[a]['exec']}</td><td class=r>{per[a]['pass']}</td><td class=r>{per[a]['total']}</td>"
+        f"<tr data-area='{esc(a)}'><td>{esc(a)}</td>"
+        f"<td class=r>{per[a]['auto']}</td>"
+        f"<td class=r>{per[a]['exec']}</td><td class=r>{per[a]['pass']}</td>"
+        f"<td class=r>{per[a]['not_auto']}</td>"
+        f"<td class=r>{per[a]['total']}</td>"
         f"<td class=r>{(per[a]['auto']/per[a]['total']*100 if per[a]['total'] else 0):.0f}%</td></tr>"
-        for a in sorted(per))
-    detail = "".join(
-        f"<tr><td><b>{esc(c['id'])}</b></td><td>{esc(c['title'])}</td>"
-        f"<td>{'yes' if c['automated']=='yes' else '—'}</td>"
-        f"<td>{esc(c['scenario'])}</td>"
-        f"<td><span class=badge style='background:{color[c['result']]}'>{label[c['result']]}</span></td></tr>"
-        for c in sorted((c for c in cases if c["automated"] == "yes"), key=lambda x: (x["area"], x["num"])))
+        for a in areas)
+    summary += (
+        f"<tr><td><b>TOTAL</b></td>"
+        f"<td class=r><b>{auto}</b></td><td class=r><b>{ex}</b></td>"
+        f"<td class=r><b>{ps}</b></td><td class=r><b>{not_auto}</b></td>"
+        f"<td class=r><b>{tot}</b></td>"
+        f"<td class=r><b>{(auto/tot*100 if tot else 0):.0f}%</b></td></tr>"
+    )
 
-    doc = f"""<!doctype html><html><head><meta charset=utf-8><title>Traceability &amp; Execution</title>
-<style>body{{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#1f2328}}
-table{{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}}
-th,td{{border:1px solid #d0d7de;padding:6px 10px;text-align:left}} th{{background:#f6f8fa}} td.r{{text-align:right}}
-.big{{font-size:20px;font-weight:700}} .badge{{color:#fff;padding:2px 8px;border-radius:10px;font-size:12px}}</style>
+    detail_cases = [c for c in cases if is_marked_auto(c["automated"])]
+    detail = "".join(
+        f"<tr data-area='{esc(c['area'])}'><td>{esc(c['area'])}</td>"
+        f"<td><b>{esc(c['id'])}</b></td><td>{esc(c['title'])}</td>"
+        f"<td>{esc(c['automated'] or '—')}</td>"
+        f"<td>{esc(c['run_tag'] or '—')}</td>"
+        f"<td>{esc(c['scenario'])}</td>"
+        f"<td>{esc(c['feature'])}</td>"
+        f"<td><span class=badge style='background:{color[c['result']]}'>{label[c['result']]}</span></td></tr>"
+        for c in detail_cases)
+
+    options = "".join(f"<option value='{esc(a)}'>{esc(a)}</option>" for a in areas)
+    generated = date.today().isoformat()
+
+    doc = f"""<!doctype html><html><head><meta charset=utf-8>
+<title>Traceability &amp; Execution</title>
+<style>
+body{{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#1f2328}}
+table{{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}}
+th,td{{border:1px solid #d0d7de;padding:6px 10px;text-align:left;vertical-align:top}}
+th{{background:#f6f8fa}} td.r{{text-align:right}}
+.big{{font-size:20px;font-weight:700}}
+.badge{{color:#fff;padding:2px 8px;border-radius:10px;font-size:12px;white-space:nowrap}}
+select{{font:inherit;padding:4px 8px}}
+</style>
 </head><body>
 <h1>Nuvepro Moodle — Traceability &amp; Execution</h1>
-<div>Generated {GENERATED} · manual cases from MoodleRegression_Testing.xlsx · scripts = Cucumber scenarios · results = target/cucumber.json</div>
-<p class=big>Automated (created): {auto}/{tot} &nbsp;|&nbsp; Executed: {ex} &nbsp;|&nbsp; Passed: {ps}</p>
-<h2>By area</h2>
-<table><tr><th>Area</th><th>Sheet</th><th>Automated</th><th>Executed</th><th>Passed</th><th>Total</th><th>Coverage</th></tr>{summary}</table>
-<h2>Automated cases → scenario → last result</h2>
-<table><tr><th>Case</th><th>Manual title</th><th>Automated</th><th>Scenario</th><th>Last run</th></tr>{detail}</table>
+<div>Generated {generated} · all module sheets in MoodleRegression_Testing_Kiwi new.xlsx</div>
+<p class=big>Automated: {auto}/{tot} &nbsp;|&nbsp; Executed: {ex}
+ &nbsp;|&nbsp; Passed: {ps} &nbsp;|&nbsp; Not automatable: {not_auto}</p>
+<p>Module filter:
+ <select id=area>
+  <option value="">All modules</option>
+  {options}
+ </select>
+</p>
+<h2>By module</h2>
+<table id=summary><thead><tr><th>Module</th><th>Automated</th><th>Executed</th>
+<th>Passed</th><th>Not automatable</th><th>Total cases</th><th>Coverage</th></tr></thead>
+<tbody>{summary}</tbody></table>
+<h2>Automated cases → scenario → Case_Status</h2>
+<table id=detail><thead><tr><th>Module</th><th>Case</th><th>Manual title</th>
+<th>Automated</th><th>Tag</th><th>Scenario</th><th>Feature</th><th>Case status</th>
+</tr></thead><tbody>{detail}</tbody></table>
+<script>
+const sel = document.getElementById('area');
+function apply() {{
+  const v = sel.value;
+  for (const table of [document.getElementById('summary'), document.getElementById('detail')]) {{
+    for (const row of table.tBodies[0].rows) {{
+      row.style.display = (!v || row.dataset.area === v) ? '' : 'none';
+    }}
+  }}
+}}
+sel.addEventListener('change', apply);
+</script>
 </body></html>"""
     (OUT_DIR / "traceability_execution.html").write_text(doc, encoding="utf-8")
 
-    print(f"Automated(created): {auto}/{tot} | Executed: {ex} | Passed: {ps}")
+    print(f"Automated {auto}/{tot} | Executed {ex} | Passed {ps} | Not automatable {not_auto}")
+    print(f"Modules: {len(per)}")
     print(f"Wrote {OUT_DIR / 'traceability_execution.csv'}")
     print(f"Wrote {OUT_DIR / 'traceability_execution.html'}")
 

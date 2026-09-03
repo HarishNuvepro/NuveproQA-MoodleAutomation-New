@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
+<suite name="SandboxParallelSuite" verbose="1" data-provider-thread-count="5">
+    <test name="SandboxFiveBrowsers">
+        <classes>
+            <class name="com.nuvepro.moodle.RunSandboxParallelTest"/>
+        </classes>
+    </test>
+</suite>

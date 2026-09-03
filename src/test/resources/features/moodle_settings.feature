@@ -1,21 +1,10 @@
-# Moodle settings (core admin config, no cloudlabs) — Site administration > Grades > Grade category
-# settings / Grade item settings. @SET-<n> maps 1:1 to the 'Moodle settings' sheet in
-# MoodleRegression_Testing_Kiwi.xlsx, numbered by row order starting after the sheet's preamble
-# row (row 3 = SET-1). This batch = the High-priority rows only (Grade category/item settings +
-# the derived role-gate gap row 81/SET-79), per CLAUDE.md "Automate High then Medium first".
-# Medium-priority rows (Course default settings, Activity chooser, Running Banner) are the next batch.
-#
-# Scope note: SET-51..SET-58 ("...with Advanced option enabled" / "...should not be excluded by
-# default...") are interpreted as covering BOTH values (Yes/No) of each Yes/No field plus its paired
-# "force" checkbox, since the sheet's wording for that block is ambiguous about which value is the
-# real default vs which is a value-under-test — verified defaults (SET-48, SET-51 baseline) come
-# straight from the live site, not from the sheet text. SET-70/SET-71 ("Advanced grade item options")
-# are a real grade item's edit-form behaviour, not a site-wide setting, so they need an actual course
-# grade item and are config-gated on COURSE_ID until one is available.
-#
-# Run: mvnw test -Dcucumber.tags="@settings"
+# Moodle settings (core admin config).
+# One tag per scenario — the same @SET-n as Moodle settings Automation_Ref.
+# Sheet row 3 = @SET-1 … row 80 = @SET-78. @SET-79 = CGAP-SET-1 (student role gate).
+#   .\mvnw.cmd test -Pwatch -Dheadless=false "-Dcucumber.tags=@SET-1"
+#   .\mvnw.cmd test -Pwatch -Dheadless=false "-Dcucumber.features=src/test/resources/features/moodle_settings.feature"
 
-Feature: Moodle settings — Grade category and Grade item defaults (High priority)
+Feature: Moodle settings
 
   @SET-47 @settings
   Scenario: Hide forced settings can be enabled and persists
@@ -484,20 +473,26 @@ Feature: Moodle settings — Grade category and Grade item defaults (High priori
     When I set the "id_s_moodlecourse_showreports" field to "Yes" and save
     Then the config change log records a change to "showreports"
 
-  # ---- genuinely blocked on this site (config-gated skip, with reason) ----
-
-  @SET-70 @settings @coursedep
+  @SET-70 @settings
   Scenario: Advanced grade item options default set
-    Then the case is skipped because "Advanced grade item options setting is not exposed on this site (admin search finds none) and course 10 has no gradeable items to edit"
+    Given I open the "gradeitemsettings" settings page
+    Then the advanced grade item options default to the Moodle built-in set
+    And those default advanced options are hidden when editing a grade item
 
-  @SET-71 @settings @coursedep
+  @SET-71 @settings
   Scenario: Advanced grade item options can be extended
-    Then the case is skipped because "Advanced grade item options setting is not exposed on this site (admin search finds none) and course 10 has no gradeable items to edit"
+    Given I open the "gradeitemsettings" settings page
+    When I mark the extra grade item options as advanced and save
+    Then those extra options are hidden when editing a grade item
 
-  @SET-32 @settings @coursedep
+  @SET-32 @settings
   Scenario: Uploads within the size limit are accepted
-    Then the case is skipped because "requires uploading real files of varying sizes into a course activity (file-resource fixtures) - out of scope for settings-page automation"
+    Given a throwaway course for settings uploads
+    When I upload files of sizes "10KB, 50KB, 1MB, 2MB" into a file resource
+    Then each upload is accepted
 
-  @SET-33 @settings @coursedep
+  @SET-33 @settings
   Scenario: Uploads above the size limit are rejected
-    Then the case is skipped because "requires uploading a 55MB file into a course activity - out of scope for settings-page automation"
+    Given a throwaway course for settings uploads
+    When I try to upload a "55MB" file into a file resource
+    Then the upload is rejected as too large

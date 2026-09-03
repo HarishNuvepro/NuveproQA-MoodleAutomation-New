@@ -1,5 +1,6 @@
 package com.nuvepro.moodle.pages;
 
+import com.microsoft.playwright.FileChooser;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 
@@ -161,5 +162,275 @@ public class MoodleSettings extends BasePage {
         } else {
             setText(fieldId, value);
         }
+    }
+
+    /**
+     * Advanced grade item options on Grade item settings ({@code grade_item_adv} multi-checkbox).
+     * Keys are Moodle's internal names; labels vary slightly by language pack.
+     */
+    public static final String[] DEFAULT_ADV_KEYS = {
+            "iteminfo", "idnumber", "gradepass", "plusfactor", "multfactor",
+            "display", "decimals", "hiddenuntil", "locktime"
+    };
+    public static final String[] EXTRA_ADV_KEYS = {
+            "gradetype", "scaleid", "grademin", "grademax",
+            "hidden", "locked", "aggregationcoef", "parentcategory"
+    };
+
+    public Locator advancedGradeItemRoot() {
+        Locator byId = page.locator("#admin-grade_item_adv, [id*='grade_item_adv']").first();
+        if (byId.count() > 0) return byId;
+        return page.locator(".form-item, .settingsform .row").filter(
+                new Locator.FilterOptions().setHasText("Advanced grade item")).first();
+    }
+
+    public boolean advancedGradeItemSettingPresent() {
+        return advancedGradeItemRoot().count() > 0
+                && page.locator("input[type='checkbox'][name*='grade_item_adv'], "
+                + "#admin-grade_item_adv input[type='checkbox']").count() > 0;
+    }
+
+    @SuppressWarnings("unchecked")
+    public java.util.Map<String, Boolean> advancedGradeItemStates() {
+        Object raw = page.evaluate("""
+                () => {
+                  const out = {};
+                  const boxes = document.querySelectorAll(
+                      "input[type='checkbox'][name*='grade_item_adv']");
+                  boxes.forEach(el => {
+                    const m = (el.name || '').match(/\\[([^\\]]+)\\]/);
+                    const key = m ? m[1] : (el.id || '').replace(/^id_s__grade_item_adv_/, '');
+                    if (key) out[key] = !!el.checked;
+                  });
+                  return out;
+                }
+                """);
+        java.util.Map<String, Boolean> map = new java.util.LinkedHashMap<>();
+        if (raw instanceof java.util.Map<?, ?> src) {
+            for (java.util.Map.Entry<?, ?> e : src.entrySet()) {
+                map.put(String.valueOf(e.getKey()), Boolean.TRUE.equals(e.getValue())
+                        || "true".equalsIgnoreCase(String.valueOf(e.getValue())));
+            }
+        }
+        return map;
+    }
+
+    public void setAdvancedGradeItemKeys(java.util.Collection<String> keys, boolean checked) {
+        page.evaluate("""
+                (payload) => {
+                  const [csv, want] = payload.split('|');
+                  const set = new Set(csv.split(',').filter(Boolean));
+                  document.querySelectorAll("input[type='checkbox'][name*='grade_item_adv']")
+                    .forEach(el => {
+                      const m = (el.name || '').match(/\\[([^\\]]+)\\]/);
+                      const key = m ? m[1] : (el.id || '').replace(/^id_s__grade_item_adv_/, '');
+                      if (!set.has(key)) return;
+                      el.checked = want === 'true';
+                      el.dispatchEvent(new Event('change', {bubbles: true}));
+                    });
+                }
+                """, String.join(",", keys) + "|" + checked);
+    }
+
+    public void restoreAdvancedGradeItemStates(java.util.Map<String, Boolean> states) {
+        if (states == null || states.isEmpty()) return;
+        open("gradeitemsettings");
+        for (java.util.Map.Entry<String, Boolean> e : states.entrySet()) {
+            setAdvancedGradeItemKeys(java.util.List.of(e.getKey()), Boolean.TRUE.equals(e.getValue()));
+        }
+        save();
+    }
+
+    public String addSimpleAssignment(String courseId, String name) {
+        navigate("/course/modedit.php?add=assign&type=&course=" + courseId + "&section=1&return=0&sr=0");
+        page.locator("#id_name").waitFor(new Locator.WaitForOptions()
+                .setState(com.microsoft.playwright.options.WaitForSelectorState.VISIBLE).setTimeout(30_000));
+        page.locator("#id_name").fill(name);
+        page.locator("#id_submitbutton").click();
+        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        page.waitForTimeout(1_500);
+        String cmid = paramFromUrl(page.url(), "id");
+        if (cmid == null) {
+            throw new IllegalStateException("assignment '" + name + "' did not save: " + page.url());
+        }
+        return cmid;
+    }
+
+    public void openGradeItemEditor(String courseId) {
+        navigate("/grade/edit/tree/index.php?id=" + courseId);
+        page.waitForTimeout(1_000);
+        Locator edit = page.locator("a[href*='grade/edit/tree/item.php']").first();
+        if (edit.count() == 0) {
+            throw new IllegalStateException("no grade item editor link on gradebook setup for course "
+                    + courseId);
+        }
+        edit.click();
+        page.locator("#id_itemname, #id_gradetype, #region-main").first().waitFor(
+                new Locator.WaitForOptions()
+                        .setState(com.microsoft.playwright.options.WaitForSelectorState.VISIBLE)
+                        .setTimeout(30_000));
+        collapseGradeItemAdvanced();
+    }
+
+    private void collapseGradeItemAdvanced() {
+        Locator less = page.locator("a:has-text('Show less'), button:has-text('Show less'), "
+                + ".moreless-toggler:has-text('less')").first();
+        try {
+            if (less.count() > 0 && less.isVisible()) less.click();
+        } catch (RuntimeException ignored) {}
+        page.waitForTimeout(400);
+    }
+
+    /**
+     * Whether a grade-item form field is hidden behind Show more / the advanced group.
+     * {@code missing} if the label is not on the form at all.
+     */
+    public String gradeItemFieldVisibility(String label) {
+        Object raw = page.evaluate("""
+                (label) => {
+                  const want = label.toLowerCase().replace(/\\s+/g, ' ').trim();
+                  const nodes = [...document.querySelectorAll(
+                      'label, .col-form-label, .fitemtitle, .form-label-addon')];
+                  const hit = nodes.find(n => {
+                    const t = (n.innerText || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                    return t === want || t.startsWith(want);
+                  });
+                  if (!hit) return 'missing';
+                  const item = hit.closest('.fitem, .form-group, [data-groupname], .row');
+                  if (!item) return 'visible';
+                  const style = window.getComputedStyle(item);
+                  const hidden = item.classList.contains('advanced')
+                      || item.classList.contains('d-none')
+                      || item.hidden
+                      || style.display === 'none'
+                      || style.visibility === 'hidden';
+                  return hidden ? 'advanced' : 'visible';
+                }
+                """, label);
+        return raw == null ? "missing" : String.valueOf(raw);
+    }
+
+    public String addFileResource(String courseId, String name, java.nio.file.Path file) {
+        navigate("/course/modedit.php?add=resource&type=&course=" + courseId + "&section=1&return=0&sr=0");
+        page.locator("#id_name").waitFor(new Locator.WaitForOptions()
+                .setState(com.microsoft.playwright.options.WaitForSelectorState.VISIBLE).setTimeout(30_000));
+        page.locator("#id_name").fill(name);
+        attachToFileManager(file);
+        page.locator("#id_submitbutton").click();
+        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        page.waitForTimeout(1_500);
+        return page.url();
+    }
+
+    /**
+     * Attach a file in the File resource filemanager. Returns null on success, or the rejection
+     * text when Moodle / the picker refuses the file (size limit).
+     */
+    public String tryAttachFileOnResourceForm(String courseId, String name, java.nio.file.Path file) {
+        navigate("/course/modedit.php?add=resource&type=&course=" + courseId + "&section=1&return=0&sr=0");
+        page.locator("#id_name").waitFor(new Locator.WaitForOptions()
+                .setState(com.microsoft.playwright.options.WaitForSelectorState.VISIBLE).setTimeout(30_000));
+        page.locator("#id_name").fill(name);
+        return attachToFileManagerOrReject(file);
+    }
+
+    private void attachToFileManager(java.nio.file.Path file) {
+        String reject = attachToFileManagerOrReject(file);
+        if (reject != null) {
+            throw new AssertionError("file '" + file.getFileName() + "' was rejected: " + reject);
+        }
+    }
+
+    private String attachToFileManagerOrReject(java.nio.file.Path file) {
+        String fileName = file.getFileName().toString();
+        Locator trigger = page.locator(".fp-btn-add, .fp-btn-choose, "
+                + "[data-fieldtype='filemanager'] .dndupload-arrow, "
+                + "[data-fieldtype='filemanager'] a, .filemanager .fp-btn-add").first();
+        try {
+            com.microsoft.playwright.FileChooser chooser = page.waitForFileChooser(
+                    new Page.WaitForFileChooserOptions().setTimeout(4_000), () -> {
+                        if (trigger.count() > 0) trigger.click();
+                    });
+            chooser.setFiles(file.toAbsolutePath());
+        } catch (RuntimeException ignored) {
+            openUploadRepository();
+            Locator input = page.locator("input[type='file']");
+            long deadline = System.currentTimeMillis() + 8_000;
+            while (input.count() == 0 && System.currentTimeMillis() < deadline) {
+                page.waitForTimeout(200);
+            }
+            if (input.count() == 0) {
+                return "no file input on " + page.url();
+            }
+            input.last().setInputFiles(file.toAbsolutePath());
+        }
+        page.waitForTimeout(800);
+        Locator upload = page.locator(".fp-upload-btn, input[value='Upload this file'], "
+                + "button:has-text('Upload this file')").first();
+        try {
+            if (upload.count() > 0 && upload.isVisible()) upload.click();
+        } catch (RuntimeException ignored) {}
+        long deadline = System.currentTimeMillis() + 45_000;
+        while (System.currentTimeMillis() < deadline) {
+            String reject = sizeRejectText();
+            if (reject != null) return reject;
+            if (fileManagerShows(fileName)) return null;
+            page.waitForTimeout(400);
+        }
+        String reject = sizeRejectText();
+        return reject != null ? reject : "file never appeared in the file manager: " + fileName;
+    }
+
+    private void openUploadRepository() {
+        Locator repo = page.locator(".fp-repo:has-text('Upload a file'), "
+                + ".fp-repo-name:has-text('Upload a file'), a:has-text('Upload a file')").first();
+        try {
+            if (repo.count() > 0 && repo.isVisible()) repo.click();
+        } catch (RuntimeException ignored) {}
+        page.waitForTimeout(600);
+    }
+
+    private boolean fileManagerShows(String fileName) {
+        String body = page.locator(".filemanager, .fp-content, [data-fieldtype='filemanager'], body")
+                .first().innerText();
+        return body != null && body.contains(fileName);
+    }
+
+    private String sizeRejectText() {
+        String body = page.locator("body").innerText();
+        if (body == null) return null;
+        String lower = body.toLowerCase();
+        if (lower.contains("too large") || lower.contains("maximum size")
+                || lower.contains("exceeds") || lower.contains("bigger than")
+                || lower.contains("maxbytes") || lower.contains("file is larger")) {
+            return body.lines()
+                    .map(String::trim)
+                    .filter(l -> {
+                        String s = l.toLowerCase();
+                        return s.contains("too large") || s.contains("maximum")
+                                || s.contains("exceed") || s.contains("bigger");
+                    })
+                    .findFirst()
+                    .orElse("file size rejected");
+        }
+        Locator err = page.locator(".moodle-exception-message, .alert-danger, .fp-msg-error, "
+                + ".notifyproblem, [data-region='toast']");
+        if (err.count() > 0) {
+            String t = err.first().innerText();
+            if (t != null && !t.isBlank()) {
+                String s = t.toLowerCase();
+                if (s.contains("large") || s.contains("size") || s.contains("maximum")
+                        || s.contains("exceed")) {
+                    return t.trim();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String paramFromUrl(String url, String name) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("[?&]" + name + "=(\\d+)").matcher(url);
+        return m.find() ? m.group(1) : null;
     }
 }

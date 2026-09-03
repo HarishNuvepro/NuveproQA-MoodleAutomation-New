@@ -19,7 +19,7 @@ import static org.testng.Assert.*;
 /**
  * Step definitions for the non-destructive gap-fill scenarios (CGAP-PG-20/24/32/37/39/40/41/42).
  * Reuses the shared TestContext (page already logged in as admin via storageState). Reuses steps
- * from PlaygroundSteps for "I open the playground activity", "I open Manage Labs", etc.
+ * from PlaygroundSteps for "I open the sandbox activity", "I open Manage Labs", etc.
  */
 public class PlaygroundAugmentedSteps {
     private final TestContext ctx;

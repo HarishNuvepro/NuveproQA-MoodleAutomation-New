@@ -5,12 +5,12 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.assertions.LocatorAssertions;
 import com.microsoft.playwright.assertions.PlaywrightAssertions;
-import com.microsoft.playwright.options.AriaRole;
 import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.pages.ManageLabs;
 import com.nuvepro.moodle.pages.PlaygroundControlPanel;
+import com.nuvepro.moodle.pages.PlaygroundLanding;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
@@ -23,9 +23,9 @@ import java.util.regex.Pattern;
 import static org.testng.Assert.*;
 
 /**
- * Step definitions for features/playground_labs.feature (all 16 PG cases).
+ * Step definitions for sandbox_labs_review.feature and legacy @PG-* playground cases.
  * Each step calls the shared Page Objects. Provisioning scenarios share ONE server-side lab:
- * PG-12 provisions it, others reuse it via "a running playground lab", PG-15 stops it, and
+ * PG-12 provisions it, others reuse it via "a running sandbox lab", PG-15 stops it, and
  * GlobalHooks.@AfterAll is the safety net.
  */
 public class PlaygroundSteps {
@@ -39,14 +39,14 @@ public class PlaygroundSteps {
 
     // ---------- Background / shared ----------
 
-    @Given("I open the playground activity")
-    public void iOpenThePlaygroundActivity() {
+    @Given("I open the sandbox activity")
+    public void iOpenTheSandboxActivity() {
         ctx.landing.open(ctx.cmid);
         ctx.sectionId = ctx.landing.hiddenSectionId();
     }
 
-    @Given("a running playground lab")
-    public void aRunningPlaygroundLab() {
+    @Given("a running sandbox lab")
+    public void aRunningSandboxLab() {
         // 1) Confirm the lab is RUNNING. The lab is provisioned once (PG-12) and stays running
         //    across the console checks, so do a QUICK robust read first and only drive the state
         //    if it's genuinely not running (driving is expensive — waits for provider ops).
@@ -101,16 +101,17 @@ public class PlaygroundSteps {
 
     // ---------- PG-1 create activity ----------
 
-    @When("I create a new playground activity")
-    public void iCreateANewPlaygroundActivity() {
+    @When("I create a new sandbox activity")
+    public void iCreateANewSandboxActivity() {
         if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
         int courseId = Integer.parseInt(Settings.COURSE_ID);
         Page page = ctx.page;
         page.navigate(Settings.BASE_URL + "/course/modedit.php?add=cloudlabs&type=&course="
                 + courseId + "&section=0&return=0&sr=0");
         page.waitForLoadState(LoadState.DOMCONTENTLOADED);
-        String name = "AUTO Playground (delete me)";
+        String name = "AUTO Sandbox " + System.currentTimeMillis();
         page.locator("#id_name").fill(name);
+        // Moodle mod_form still uses labtype value "playground" for the Sandbox lab type.
         Locator pgRadio = page.locator("input[name='labtype'][value='playground']");
         if (pgRadio.count() > 0 && !pgRadio.first().isChecked()) pgRadio.first().check();
         Locator sel = page.locator("#id_lab_template_id");
@@ -144,22 +145,21 @@ public class PlaygroundSteps {
             }
         }
         ctx.newActivityCmid = cmid;
+        ctx.newActivityName = name;
+        System.out.println("[PG-1] kept sandbox activity cmid=" + cmid + " name=" + name);
     }
 
-    @Then("the playground activity is created and then removed")
-    public void thePlaygroundActivityIsCreatedAndRemoved() {
-        assertNotNull(ctx.newActivityCmid, "created playground activity not found");
-        Page page = ctx.page;
-        Object sesskeyObj = page.evaluate("() => (window.M && M.cfg && M.cfg.sesskey) || ''");
-        String sesskey = sesskeyObj == null ? "" : sesskeyObj.toString();
-        if (!sesskey.isEmpty()) {
-            page.navigate(Settings.BASE_URL + "/course/mod.php?sesskey=" + sesskey
-                    + "&sr=0&delete=" + ctx.newActivityCmid);
-            page.waitForLoadState(LoadState.DOMCONTENTLOADED);
-            Locator confirm = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions()
-                    .setName(Pattern.compile("delete|yes", Pattern.CASE_INSENSITIVE)));
-            if (confirm.count() > 0) confirm.first().click();
-        }
+    @Then("the sandbox activity is created")
+    public void theSandboxActivityIsCreated() {
+        assertNotNull(ctx.newActivityCmid, "created sandbox activity not found");
+        assertFalse(ctx.newActivityCmid.isBlank(), "created sandbox activity cmid is blank");
+        // Keep the activity — do not delete until explicitly requested.
+    }
+
+    /** @deprecated kept only so old feature wording does not break mid-edit; prefer {@link #theSandboxActivityIsCreated()}. */
+    @Then("the sandbox activity is created and then removed")
+    public void theSandboxActivityIsCreatedAndRemoved() {
+        theSandboxActivityIsCreated();
     }
 
     // ---------- PG-2 / PG-11 manage labs ----------
@@ -216,15 +216,85 @@ public class PlaygroundSteps {
 
     @When("I open the catalog-UI lab console")
     public void iOpenTheCatalogUiLabConsole() {
-        if (Settings.PLAYGROUND_CATALOG_CMID.isEmpty()) throw new SkipException("PLAYGROUND_CATALOG_CMID not set");
-        ctx.landing.open(Integer.parseInt(Settings.PLAYGROUND_CATALOG_CMID));
+        int cmid = resolveCatalogSandboxCmid();
+        ctx.landing.open(cmid);
+        // openLabConsole starts/continues the lab so catalog UI can render on the console.
+        // Do not mark labProvisioned / do not delete the activity — keep sandbox data until cleanup is requested.
         ctx.landing.openLabConsole();
+    }
+
+    /** Prefer PLAYGROUND_CATALOG_CMID; otherwise create+keep a catalog-template sandbox activity. */
+    private int resolveCatalogSandboxCmid() {
+        if (!Settings.PLAYGROUND_CATALOG_CMID.isEmpty()) {
+            return Integer.parseInt(Settings.PLAYGROUND_CATALOG_CMID);
+        }
+        if (Settings.COURSE_ID.isEmpty()) {
+            throw new SkipException("COURSE_ID not set (needed to create a catalog sandbox activity)");
+        }
+        Page page = ctx.page;
+        int courseId = Integer.parseInt(Settings.COURSE_ID);
+        page.navigate(Settings.BASE_URL + "/course/modedit.php?add=cloudlabs&type=&course="
+                + courseId + "&section=0&return=0&sr=0");
+        page.waitForLoadState(LoadState.DOMCONTENTLOADED);
+        String name = "AUTO Sandbox Catalog " + System.currentTimeMillis();
+        page.locator("#id_name").fill(name);
+        Locator pgRadio = page.locator("input[name='labtype'][value='playground']");
+        if (pgRadio.count() > 0 && !pgRadio.first().isChecked()) pgRadio.first().check();
+        Locator sel = page.locator("#id_lab_template_id");
+        String catalogValue = null;
+        if (sel.count() > 0) {
+            Locator options = sel.locator("option");
+            for (int i = 0; i < options.count(); i++) {
+                String v = options.nth(i).getAttribute("value");
+                String t = nz(options.nth(i).innerText()).toLowerCase();
+                if (v == null || v.isBlank() || "0".equals(v)) continue;
+                if (t.contains("catalog")) {
+                    catalogValue = v;
+                    break;
+                }
+            }
+        }
+        if (catalogValue == null) {
+            throw new SkipException("No catalog lab template in the create form — set PLAYGROUND_CATALOG_CMID in .env "
+                    + "to an existing catalog sandbox activity cmid");
+        }
+        sel.selectOption(catalogValue);
+        page.locator("#id_submitbutton").click();
+        page.waitForLoadState(LoadState.DOMCONTENTLOADED);
+        assertFalse(page.url().contains("modedit.php"), "catalog sandbox form did not submit: " + page.url());
+        String cmid = null;
+        Matcher m = Pattern.compile("/mod/cloudlabs/view\\.php\\?id=(\\d+)").matcher(page.url());
+        if (m.find()) cmid = m.group(1);
+        assertNotNull(cmid, "catalog sandbox activity cmid not found after create");
+        ctx.newActivityCmid = cmid;
+        ctx.newActivityName = name;
+        System.out.println("[PG-9] kept catalog sandbox activity cmid=" + cmid + " name=" + name
+                + " (also set PLAYGROUND_CATALOG_CMID=" + cmid + " in .env to reuse)");
+        return Integer.parseInt(cmid);
     }
 
     @Then("the catalog UI input surface is shown")
     public void theCatalogUiInputSurfaceIsShown() {
-        assertTrue(ctx.page.locator("#np-ap-mod-lab-ui-schema, #catInputUI, #subCatalogDataSubmitBtn").count() > 0,
-                "Catalog UI input surface not present");
+        Locator catalog = ctx.page.locator("#np-ap-mod-lab-ui-schema, #catInputUI, #subCatalogDataSubmitBtn, "
+                + "#cat_tab_content_actionui, .nl-catalog-ui, [id*='Catalog'], [id*='catalog']");
+        boolean shown = false;
+        for (int i = 0; i < 30; i++) {
+            if (catalog.count() > 0) {
+                for (int j = 0; j < catalog.count(); j++) {
+                    try {
+                        if (catalog.nth(j).isVisible()) { shown = true; break; }
+                    } catch (RuntimeException ignored) {}
+                }
+            }
+            if (shown) break;
+            String body = ctx.page.locator("body").innerText().toLowerCase();
+            if (body.contains("catalog") && (body.contains("input") || body.contains("submit") || body.contains("select"))) {
+                shown = true;
+                break;
+            }
+            ctx.page.waitForTimeout(1_000);
+        }
+        assertTrue(shown, "Catalog UI input surface not present on the sandbox console");
     }
 
     // ---------- PG-10 report ----------

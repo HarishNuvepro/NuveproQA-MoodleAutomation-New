@@ -57,8 +57,75 @@ public class GuidedLanding extends BasePage {
         return page.locator(USER_LABS).count() > 0 && page.locator(USER_GUIDED).count() > 0;
     }
 
+    public boolean manageOverridesPresent() {
+        return page.locator(MANAGE_OVERRIDES).count() > 0
+                || page.locator("a[href*='manageguidedprojectoverrides']").count() > 0;
+    }
+
+    public boolean startPracticeProjectButtonPresent() {
+        return visible(START);
+    }
+
+    public boolean attemptsSummaryPresent() {
+        return page.locator(ATTEMPTS_CARDS).count() > 0
+                || page.locator("body").innerText().toLowerCase().contains("attempt");
+    }
+
+    public boolean completeButtonPresent() {
+        return page.locator(COMPLETE).count() > 0;
+    }
+
+    public boolean completedAttemptProgressIconPresent() {
+        return page.locator(ATTEMPTS_CARDS + " .attempt-card .fa-eye, "
+                + ATTEMPTS_CARDS + " .attempt-card [aria-label*='progress' i]").count() > 0;
+    }
+
     public String detailsText() {
         return page.locator(DETAILS).count() > 0 ? page.locator(DETAILS).first().innerText() : "";
+    }
+
+    public boolean descriptionAndReadMorePresent() {
+        return page.locator(".intro-cl-content, #full-text, .card-body").count() > 0
+                && (page.locator("#read-more-btn, a:has-text('Read More')").count() > 0
+                || page.locator("#full-text, .intro-cl-content").first().innerText().length() > 20);
+    }
+
+    public boolean readMoreOpensDescription() {
+        Locator more = page.locator("#read-more-btn, a:has-text('Read More')");
+        if (more.count() == 0) return descriptionAndReadMorePresent();
+        more.first().click();
+        page.waitForTimeout(500);
+        Locator modal = page.locator("#readMoreModal, #full-content");
+        boolean shown = false;
+        for (int i = 0; i < modal.count(); i++) {
+            if (modal.nth(i).isVisible() && !modal.nth(i).innerText().isBlank()) {
+                shown = true;
+                Locator close = modal.nth(i).locator("button.close, button:has-text('Close'), [data-dismiss='modal']");
+                if (close.count() > 0) {
+                    try { close.first().click(); page.waitForTimeout(300); } catch (RuntimeException ignored) {}
+                }
+                break;
+            }
+        }
+        return shown || page.locator("#full-content, #full-text").count() > 0;
+    }
+
+    public boolean introVideoControlPresent() {
+        Locator hidden = page.locator("#videoLink");
+        String href = hidden.count() > 0 ? hidden.first().inputValue() : "";
+        return page.locator("#videoModal, #videoFrame, button:has-text('Video'), a:has-text('Video'), "
+                + "[data-target='#videoModal']").count() > 0
+                || (href != null && !href.isBlank());
+    }
+
+    public boolean landingShowsDatesTimeLimitAndAttempts() {
+        String t = detailsText().toLowerCase();
+        if (t.isBlank()) t = page.locator("body").innerText().toLowerCase();
+        boolean dates = t.contains("date") || java.util.regex.Pattern.compile("\\d{1,2}\\s*\\w{3}").matcher(t).find();
+        boolean time = t.contains("time") || t.contains("limit") || t.contains("duration")
+                || t.contains("min");
+        boolean attempts = t.contains("attempt");
+        return dates && time && attempts;
     }
 
     public String sectionId() {

@@ -4,9 +4,12 @@ import io.cucumber.testng.AbstractTestNGCucumberTests;
 import io.cucumber.testng.CucumberOptions;
 
 /**
- * TestNG entry point for the Cucumber/BDD scenarios. Discovered by testng-fast.xml
- * (package scan). Runs the Gherkin scenarios in src/test/resources/features using the
- * step definitions in com.nuvepro.moodle.steps.
+ * Main Cucumber runner for all feature files. Tag filtering comes from Maven
+ * {@code -Dcucumber.tags=...} (surefire system property {@code cucumber.filter.tags}).
+ *
+ *   CLI:  .\mvnw test -Pwatch "-Dcucumber.tags=@PG-1"
+ *   Fast: .\mvnw test
+ *   Slow: .\mvnw test -Pslow
  */
 @CucumberOptions(
         features = "src/test/resources/features",

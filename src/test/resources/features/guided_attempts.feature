@@ -6,7 +6,8 @@
 
 Feature: Guided attempt lifecycle
 
-  @CGAP-PGG-2 @CGAP-PGG-3 @CGAP-PGG-5 @guidedattempts @guidedlab @provisioning
+  @PP-12 @PP-20 @PP-21 @PP-37 @PP-42 @CGAP-PGG-2 @CGAP-PGG-3 @CGAP-PGG-5
+  @practice_project @guidedattempts @guidedlab @provisioning
   Scenario: A student submits an attempt and starts a new one after the cooldown
     Given a student is enrolled in the course
     When the student starts the guided project
@@ -14,6 +15,8 @@ Feature: Guided attempt lifecycle
     And the guided lab reaches Running
     When the student submits the guided attempt while the lab is running
     Then the attempt is submitted and the student returns to the landing
+    And the submitted guided attempt records evaluation and checkpoint results
+    And the completed with-progress attempt shows its progress icon
     And the new-attempt cooldown is observed or already elapsed
     When the student starts a new attempt after the cooldown
     Then the guided control panel is shown

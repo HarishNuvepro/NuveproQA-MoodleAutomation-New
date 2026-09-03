@@ -19,7 +19,11 @@
         <!-- default suite; override with a profile -->
         <suiteXmlFile>testng-fast.xml</suiteXmlFile>
         <!-- Cucumber scenario filter: fast = non-destructive; slow profile flips to provisioning -->
-        <cucumber.tags>not @provisioning</cucumber.tags>
+        <cucumber.tags>not @provisioning and not @sandbox-cleanup</cucumber.tags>
+        <!-- Browser defaults; -Pwatch sets headed + slowmo so you can watch -->
+        <headless>true</headless>
+        <slowmo>0</slowmo>
+        <sandbox.parallel>false</sandbox.parallel>
     </properties>
 
     <dependencies>
@@ -71,6 +75,9 @@
                     </suiteXmlFiles>
                     <systemPropertyVariables>
                         <cucumber.filter.tags>${cucumber.tags}</cucumber.filter.tags>
+                        <headless>${headless}</headless>
+                        <slowmo>${slowmo}</slowmo>
+                        <sandbox.parallel>${sandbox.parallel}</sandbox.parallel>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
@@ -87,11 +94,27 @@
             </properties>
         </profile>
         <!-- mvn test -Pwatch -Dcucumber.tags="@PG-1" -> runs ONLY the tagged scenario(s),
-             no ConnectivityTest. Add -Dheadless=false -Dslowmo=500 to watch it. -->
+             no ConnectivityTest. Watch profile is headed + slowed so you can follow the UI.
+             Override: -Dheadless=true -Dslowmo=0 -->
         <profile>
             <id>watch</id>
             <properties>
                 <suiteXmlFile>testng-watch.xml</suiteXmlFile>
+                <headless>false</headless>
+                <slowmo>800</slowmo>
+            </properties>
+        </profile>
+        <!-- Complete Sandbox suite with five capped Chromium workers.
+             Sandbox student scenarios remain in one lane; independent Manage Labs scenarios
+             run concurrently. The four deletes are fired together under the same five-browser cap. -->
+        <profile>
+            <id>sandbox-parallel</id>
+            <properties>
+                <suiteXmlFile>testng-sandbox-parallel.xml</suiteXmlFile>
+                <cucumber.tags>not @skip and not @sandbox-cleanup</cucumber.tags>
+                <headless>true</headless>
+                <slowmo>0</slowmo>
+                <sandbox.parallel>true</sandbox.parallel>
             </properties>
         </profile>
     </profiles>

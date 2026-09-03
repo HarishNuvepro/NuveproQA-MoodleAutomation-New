@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
-<!-- Watch suite: runs ONLY the Cucumber scenarios (no ConnectivityTest), so a tag filter
-     isolates exactly what you want to watch. Scope with -Dcucumber.tags="@PG-1".
-     Usage: mvn test -Pwatch -Dheadless=false -Dslowmo=500 -Dcucumber.tags="@PG-1" -->
+<!-- Watch suite: runs ONLY the main Cucumber runner (no ConnectivityTest, no scoped runners).
+     Scope with -Dcucumber.tags="@PG-1" (or any tag expression).
+     Usage: mvn test -Pwatch -Dheadless=false -Dslowmo=500 "-Dcucumber.tags=@PG-1" -->
 <suite name="MoodleWatchSuite" verbose="1">
     <test name="Watch">
         <classes>

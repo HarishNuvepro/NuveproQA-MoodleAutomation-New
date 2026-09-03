@@ -6,12 +6,19 @@
 
 Feature: Guided lab lifecycle
 
-  @PGG-14 @PGG-15 @PGG-16 @PGG-17 @CGAP-PGG-1 @CGAP-PGG-5 @CGAP-PGG-8 @CGAP-PGG-9 @guidedlab @provisioning
+  @PP-11 @PP-27 @PP-29 @PP-33 @PP-48 @PP-139
+  @PGG-14 @PGG-15 @PGG-16 @PGG-17 @CGAP-PGG-1 @CGAP-PGG-5 @CGAP-PGG-8 @CGAP-PGG-9
+  @practice_project @guidedlab @provisioning
   Scenario: A student runs the guided project lifecycle - start, stop, continue, submit
     Given a student is enrolled in the course
     When the student starts the guided project
     Then the guided control panel is shown
     And the guided lab reaches Running
+    And the in-progress student can open Add Override
+    Then the guided console has Submit and no Get Progress action
+    And the guided console shows instructions duration and support
+    And the running guided console shows Lab Credentials
+    And the Stop and Submit actions show meaningful confirmations
     When the student stops the guided lab
     Then the guided lab is Stopped and the student returns to the landing
     When the student continues the guided project

@@ -58,6 +58,13 @@ template type. Each needs an activity configured with that template type (record
       stopped lab. Scenario currently SKIPS if no details view appears. Verify how Lab Details
       renders (AJAX modal? different lab state? separate window?) and make the assertion firm.
 
+## Sandbox @SB-user — deferred exact value checks (presence OK for now)
+- [ ] **Duration** — assert allotted/consumed/remaining against **CloudLabs portal** values for the lab.
+- [ ] **Credentials** — assert exact username/password against **CloudLabs portal** values.
+- [ ] **Lab Info** — content is from **lab template creation** (often populated; not normally empty).
+      When template lab-info text is available in config/test data, assert that exact text on the console.
+- [x] **Description / Instructions** — must match activity-create description (landing + console Instructions).
+
 ## Tooling / onboarding
 - [ ] Traceability tool: keep in Python or port to Java (Apache POI + Jackson) if all-Java desired.
 - [ ] Consider Allure reporting for a shareable dashboard.

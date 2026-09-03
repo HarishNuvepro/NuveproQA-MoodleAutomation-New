@@ -2,17 +2,24 @@ package com.nuvepro.moodle.steps;
 
 import com.microsoft.playwright.Browser;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.pages.CourseAdmin;
 import com.nuvepro.moodle.pages.MoodleSettings;
 import io.cucumber.java.After;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
 
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
 /**
@@ -24,8 +31,12 @@ public class MoodleSettingsSteps {
     private final TestContext ctx;
     private final MoodleSettings settings;
     private final Map<String, String> originalValues = new LinkedHashMap<>();
+    private Map<String, Boolean> originalAdvanced;
+    private final List<String> throwawayCourses = new ArrayList<>();
     private String currentSection;
     private MoodleSettings studentSettings;
+    private String uploadCourseId;
+    private String oversizeReject;
 
     public MoodleSettingsSteps(TestContext ctx) {
         this.ctx = ctx;
@@ -125,11 +136,135 @@ public class MoodleSettingsSteps {
         assertTrue(body.contains(text), "notification banner text '" + text + "' not found on the dashboard");
     }
 
-    // ---- config-gated skips (precondition not available on this site) ----
+    // ---- Advanced grade item options (SET-70 / SET-71) ----
 
-    @Then("the case is skipped because {string}")
-    public void theCaseIsSkippedBecause(String reason) {
-        throw new org.testng.SkipException(reason);
+    @Then("the advanced grade item options default to the Moodle built-in set")
+    public void advancedDefaultsAreSet() {
+        assertTrue(settings.advancedGradeItemSettingPresent(),
+                "Advanced grade item options control missing on gradeitemsettings");
+        Map<String, Boolean> states = settings.advancedGradeItemStates();
+        List<String> missing = new ArrayList<>();
+        for (String key : MoodleSettings.DEFAULT_ADV_KEYS) {
+            if (!Boolean.TRUE.equals(states.get(key))) missing.add(key);
+        }
+        assertTrue(missing.isEmpty(),
+                "default advanced keys not checked: " + missing + " (have " + states + ")");
+    }
+
+    @Then("those default advanced options are hidden when editing a grade item")
+    public void defaultAdvancedHiddenOnGradeItem() {
+        String courseId = newCourse("SET70");
+        settings.addSimpleAssignment(courseId, "SET70 grade item");
+        settings.openGradeItemEditor(courseId);
+        assertAdvancedOnForm(List.of(
+                "Item info", "ID number", "Grade to pass",
+                "Grade display type", "Overall decimal places"));
+    }
+
+    @When("I mark the extra grade item options as advanced and save")
+    public void markExtraAdvancedAndSave() {
+        assertTrue(settings.advancedGradeItemSettingPresent(),
+                "Advanced grade item options control missing on gradeitemsettings");
+        originalAdvanced = settings.advancedGradeItemStates();
+        settings.setAdvancedGradeItemKeys(List.of(MoodleSettings.EXTRA_ADV_KEYS), true);
+        settings.save();
+    }
+
+    @Then("those extra options are hidden when editing a grade item")
+    public void extraAdvancedHiddenOnGradeItem() {
+        String courseId = newCourse("SET71");
+        settings.addSimpleAssignment(courseId, "SET71 grade item");
+        settings.openGradeItemEditor(courseId);
+        assertAdvancedOnForm(List.of("Grade type", "Minimum grade", "Maximum grade", "Hidden", "Locked"));
+    }
+
+    private void assertAdvancedOnForm(List<String> labels) {
+        List<String> visible = new ArrayList<>();
+        List<String> missing = new ArrayList<>();
+        for (String label : labels) {
+            String vis = settings.gradeItemFieldVisibility(label);
+            if ("visible".equals(vis)) visible.add(label);
+            if ("missing".equals(vis)) missing.add(label);
+        }
+        assertTrue(visible.isEmpty(),
+                "expected advanced/hidden on the grade item form but still visible: " + visible);
+        assertTrue(missing.size() < labels.size(),
+                "none of the expected labels were on the grade item form: " + labels
+                        + " missing=" + missing);
+    }
+
+    // ---- Course max upload size (SET-32 / SET-33) ----
+
+    @Given("a throwaway course for settings uploads")
+    public void throwawayCourseForUploads() {
+        uploadCourseId = newCourse("SETUpload");
+    }
+
+    @When("I upload files of sizes {string} into a file resource")
+    public void uploadFilesOfSizes(String csvSizes) {
+        assertNotNull(uploadCourseId, "no throwaway course");
+        for (String raw : csvSizes.split(",")) {
+            String spec = raw.trim();
+            Path file = sizedFile(spec);
+            String url = settings.addFileResource(uploadCourseId, "Upload " + spec, file);
+            assertTrue(!url.contains("modedit.php") || url.contains("id="),
+                    spec + " upload did not save a file resource: " + url);
+        }
+    }
+
+    @Then("each upload is accepted")
+    public void eachUploadIsAccepted() {
+        assertNotNull(uploadCourseId, "no files were uploaded");
+    }
+
+    @When("I try to upload a {string} file into a file resource")
+    public void tryUploadOversized(String spec) {
+        assertNotNull(uploadCourseId, "no throwaway course");
+        Path file = sizedFile(spec);
+        oversizeReject = settings.tryAttachFileOnResourceForm(uploadCourseId, "Oversize " + spec, file);
+    }
+
+    @Then("the upload is rejected as too large")
+    public void uploadRejectedAsTooLarge() {
+        assertNotNull(oversizeReject, "Moodle accepted the oversize file instead of rejecting it");
+        String lower = oversizeReject.toLowerCase();
+        assertTrue(lower.contains("large") || lower.contains("maximum") || lower.contains("exceed")
+                        || lower.contains("bigger") || lower.contains("size")
+                        || lower.contains("never appeared"),
+                "rejection was not a size limit: " + oversizeReject);
+    }
+
+    private String newCourse(String prefix) {
+        String stamp = String.valueOf(System.currentTimeMillis() % 1_000_000);
+        String id = new CourseAdmin(ctx.page).createCourse(prefix + " " + stamp, prefix + stamp);
+        throwawayCourses.add(id);
+        return id;
+    }
+
+    private static Path sizedFile(String spec) {
+        String s = spec.trim().toUpperCase().replace(" ", "");
+        long bytes;
+        if (s.endsWith("KB")) bytes = Long.parseLong(s.replace("KB", "")) * 1024;
+        else if (s.endsWith("MB")) bytes = Long.parseLong(s.replace("MB", "")) * 1024 * 1024;
+        else bytes = Long.parseLong(s.replaceAll("[^0-9]", ""));
+        try {
+            Path dir = Path.of("target", "settings-uploads");
+            Files.createDirectories(dir);
+            Path file = dir.resolve("set_" + s.toLowerCase() + ".bin");
+            if (Files.exists(file) && Files.size(file) == bytes) return file;
+            try (OutputStream out = Files.newOutputStream(file)) {
+                byte[] chunk = new byte[8192];
+                long left = bytes;
+                while (left > 0) {
+                    int n = (int) Math.min(chunk.length, left);
+                    out.write(chunk, 0, n);
+                    left -= n;
+                }
+            }
+            return file;
+        } catch (IOException e) {
+            throw new RuntimeException("could not write " + spec + " fixture: " + e.getMessage(), e);
+        }
     }
 
     // ---- role gate (SET-79) ----
@@ -158,12 +293,29 @@ public class MoodleSettingsSteps {
     /** Leave shared site config exactly as this scenario found it. */
     @After("@settings")
     public void restoreOriginalValues() {
-        if (originalValues.isEmpty() || currentSection == null) return;
-        settings.open(currentSection);
-        for (Map.Entry<String, String> e : originalValues.entrySet()) {
-            settings.setValue(e.getKey(), e.getValue());
+        try {
+            if (originalAdvanced != null) {
+                settings.restoreAdvancedGradeItemStates(originalAdvanced);
+                originalAdvanced = null;
+            }
+            if (!originalValues.isEmpty() && currentSection != null) {
+                settings.open(currentSection);
+                for (Map.Entry<String, String> e : originalValues.entrySet()) {
+                    settings.setValue(e.getKey(), e.getValue());
+                }
+                settings.save();
+                originalValues.clear();
+            }
+        } finally {
+            CourseAdmin admin = new CourseAdmin(ctx.page);
+            for (String id : throwawayCourses) {
+                try {
+                    admin.deleteCourse(id);
+                } catch (RuntimeException e) {
+                    System.out.println("[settings] delete course " + id + " failed: " + e.getMessage());
+                }
+            }
+            throwawayCourses.clear();
         }
-        settings.save();
-        originalValues.clear();
     }
 }
