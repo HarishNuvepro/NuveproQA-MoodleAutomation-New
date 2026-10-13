@@ -20,7 +20,7 @@ Feature: Assessment — admin lab actions
   Scenario: Cost/duration/budget settings on a running lab
     Then this lifecycle case needs a running or completed assessment lab
 
-  @A11
+  @A11 @mediumbatch1
   Scenario: Manage challenges lists enrolled users with attempt columns
     When admin opens manage challenges
     Then the manage challenges table lists users with attempt columns

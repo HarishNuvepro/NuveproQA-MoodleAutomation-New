@@ -20,6 +20,13 @@ public final class Settings {
             .ignoreIfMissing()
             .load();
 
+    /** Auto-filled by {@code PracticeProjectFixtures} when variant cmids are created on the suite course. */
+    private static final Dotenv PRACTICE = Dotenv.configure()
+            .directory(".")
+            .filename("practice.env")
+            .ignoreIfMissing()
+            .load();
+
     private Settings() {}
 
     private static String get(String key, String def) {
@@ -33,6 +40,13 @@ public final class Settings {
         String v = ASSESS.get(key);
         if (v == null || v.isBlank()) v = get(key, "");
         return (v == null || v.isBlank()) ? def : v.trim();
+    }
+
+    /** practice.env first, then .env / environment (used for GUIDED_* cmids). */
+    public static String practiceKey(String key) {
+        String v = PRACTICE.get(key);
+        if (v == null || v.isBlank()) v = get(key, "");
+        return v == null ? "" : v.trim();
     }
 
     public static final String BASE_URL = stripTrailingSlash(get("MOODLE_BASE_URL", "http://localhost"));
@@ -62,15 +76,17 @@ public final class Settings {
     /** Course with self-enrolment enabled so a learner can Enrol me (default 70). */
     public static final String SELF_ENROL_COURSE_ID = get("SELF_ENROL_COURSE_ID", "70");
     public static final String PLAYGROUND_CMID = get("PLAYGROUND_CMID", "");
-    public static final String GUIDED_CMID = get("GUIDED_CMID", "");
+    public static final String GUIDED_CMID = practiceKey("GUIDED_CMID");
     /** Optional Practice Project fixtures used by config-gated conversion scenarios. */
-    public static final String GUIDED_WITHOUT_PROGRESS_CMID = get("GUIDED_WITHOUT_PROGRESS_CMID", "");
-    public static final String GUIDED_NO_STOP_CMID = get("GUIDED_NO_STOP_CMID", "");
-    public static final String GUIDED_PARALLEL_CMID = get("GUIDED_PARALLEL_CMID", "");
-    public static final String GUIDED_TIMED_CMID = get("GUIDED_TIMED_CMID", "");
+    public static final String GUIDED_WITHOUT_PROGRESS_CMID = practiceKey("GUIDED_WITHOUT_PROGRESS_CMID");
+    public static final String GUIDED_NO_STOP_CMID = practiceKey("GUIDED_NO_STOP_CMID");
+    public static final String GUIDED_PARALLEL_CMID = practiceKey("GUIDED_PARALLEL_CMID");
+    public static final String GUIDED_TIMED_CMID = practiceKey("GUIDED_TIMED_CMID");
     public static final String PRACTICE_DETAILED_REPORT_URL = get("PRACTICE_DETAILED_REPORT_URL", "");
     public static final String PRACTICE_SUMMARY_REPORT_URL = get("PRACTICE_SUMMARY_REPORT_URL", "");
     // Assessment activity cmids — configured in assessment.env (see that file for what each is for).
+    /** Optional path to Lab Readiness admin dashboard (e.g. /mod/cloudlabs/labreadinessdashboard.php). */
+    public static final String LAB_READINESS_DASHBOARD_PATH = get("LAB_READINESS_DASHBOARD_PATH", "");
     public static final String ASSESSMENT_CMID = getAssess("ASSESSMENT_CMID", "");
     public static final String ASSESSMENT_RANDOM_CMID = getAssess("ASSESSMENT_RANDOM_CMID", "");
     public static final String ASSESSMENT_TESTCASE_CMID = getAssess("ASSESSMENT_TESTCASE_CMID", "");
@@ -94,7 +110,17 @@ public final class Settings {
     //   mvn test -Dheadless=false            -> watch the browser
     //   mvn test -Dheadless=false -Dslowmo=500 -> watch, slowed to 500ms/action
     public static final boolean HEADLESS = resolveBool("headless", "HEADLESS", "true");
-    public static final double SLOWMO_MS = resolveNum("slowmo", "SLOWMO_MS", "0");
+    /** Default 650ms so headed runs show each UI action; override with {@code -Dslowmo=0} for CI speed. */
+    public static final double SLOWMO_MS = resolveNum("slowmo", "SLOWMO_MS", "650");
+    /** Page zoom in headed runs ({@code document.documentElement.style.zoom}). Override with {@code -Dbrowser.zoom=100}. */
+    public static final int BROWSER_ZOOM_PERCENT =
+            (int) resolveNum("browser.zoom", "BROWSER_ZOOM_PERCENT", "65");
+    /** Skip module @After deletes; run {@code mvnw test -Pcleanup} after a green run. */
+    public static final boolean DEFER_SCENARIO_CLEANUP =
+            resolveBool("automation.deferCleanup", "AUTOMATION_DEFER_CLEANUP", "false");
+    /** Log cleanup actions only ({@code -Pcleanup -DcleanupDryRun=true}). */
+    public static final boolean CLEANUP_DRY_RUN =
+            resolveBool("cleanupDryRun", "AUTOMATION_CLEANUP_DRY_RUN", "false");
     public static final double DEFAULT_TIMEOUT_MS = Double.parseDouble(get("DEFAULT_TIMEOUT_MS", "15000"));
 
     private static boolean resolveBool(String sysProp, String envKey, String def) {

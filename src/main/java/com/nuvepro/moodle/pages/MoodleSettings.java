@@ -135,8 +135,7 @@ public class MoodleSettings extends BasePage {
     }
 
     public void save() {
-        page.locator(SUBMIT).click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(page.locator(SUBMIT));
         page.waitForTimeout(1_200);
     }
 
@@ -246,8 +245,7 @@ public class MoodleSettings extends BasePage {
         page.locator("#id_name").waitFor(new Locator.WaitForOptions()
                 .setState(com.microsoft.playwright.options.WaitForSelectorState.VISIBLE).setTimeout(30_000));
         page.locator("#id_name").fill(name);
-        page.locator("#id_submitbutton").click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(page.locator("#id_submitbutton"));
         page.waitForTimeout(1_500);
         String cmid = paramFromUrl(page.url(), "id");
         if (cmid == null) {
@@ -316,8 +314,7 @@ public class MoodleSettings extends BasePage {
                 .setState(com.microsoft.playwright.options.WaitForSelectorState.VISIBLE).setTimeout(30_000));
         page.locator("#id_name").fill(name);
         attachToFileManager(file);
-        page.locator("#id_submitbutton").click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(page.locator("#id_submitbutton"));
         page.waitForTimeout(1_500);
         return page.url();
     }

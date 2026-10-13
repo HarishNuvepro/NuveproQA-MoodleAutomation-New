@@ -6,6 +6,7 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import com.nuvepro.moodle.config.Settings;
+import com.nuvepro.moodle.helpers.AssessmentCreateSpec;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -16,12 +17,15 @@ import java.util.regex.Pattern;
 
 /**
  * Admin course + activity authoring, used to build the Sequential Activity Completion fixture:
- * create a course (completion defaults on), add URL activities (a lightweight module that needs only
- * a name + external URL — no rich-text editor), set an activity's completion to "students manually
- * mark as done", and restrict one activity on another's completion via the availabilityconditionsjson
+ * create a course (completion defaults on), add CloudLabs assessment (challenge) or assignment modules
+ * for fixtures, set completion to "students manually mark as done", and restrict
+ * one activity on another's completion via the availabilityconditionsjson
  * hidden field (robust vs. driving the JS restrict-access builder). Selectors verified live.
  */
 public class CourseAdmin extends BasePage {
+    /** Account lab template fragment for minimal assessment (challenge) saves — not sandbox/playground. */
+    private static final String SAC_ASSESSMENT_TEMPLATE = "aws.account.clab ELB";
+
     private String restoredCategoryId = "";
     private String restoredCategoryName = "";
 
@@ -84,7 +88,7 @@ public class CourseAdmin extends BasePage {
     public boolean rejectsMissingRequiredCourseFields(String uniqueShortName) {
         navigate("/course/edit.php?category=1");
         page.locator("#id_shortname").fill(uniqueShortName);
-        page.locator("#id_saveanddisplay").click();
+        submitAndAwaitNewPage(page.locator("#id_saveanddisplay"));
         page.waitForTimeout(800);
         return page.url().contains("/course/edit.php")
                 && page.locator("[id^='id_error_'], .invalid-feedback, .form-control-feedback")
@@ -102,8 +106,7 @@ public class CourseAdmin extends BasePage {
             setSelectValue("#id_parent", parentId);
         }
         Locator submit = page.locator("#id_submitbutton, button[type='submit']").first();
-        submit.click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(submit);
         page.waitForTimeout(1_200);
         String id = param(page.url(), "categoryid");
         if (id == null) id = param(page.url(), "id");
@@ -194,8 +197,7 @@ public class CourseAdmin extends BasePage {
         Locator field = page.locator("#id_visible");
         if (field.count() == 0) throw new AssertionError("course visibility field not found");
         setSelectValue("#id_visible", visible ? "1" : "0");
-        page.locator("#id_saveandreturn, #id_saveanddisplay, #id_submitbutton").first().click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(page.locator("#id_saveandreturn, #id_saveanddisplay, #id_submitbutton").first());
         page.waitForTimeout(900);
         // Re-open and confirm Moodle persisted the value (Boost can leave the native select stale).
         navigate("/course/edit.php?id=" + courseId);
@@ -221,8 +223,7 @@ public class CourseAdmin extends BasePage {
                 throw new AssertionError("course category field not found for course " + courseId);
             }
             setSelectValue("#id_category", categoryId);
-            page.locator("#id_saveandreturn, #id_saveanddisplay, #id_submitbutton").first().click();
-            page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+            submitAndAwaitNewPage(page.locator("#id_saveandreturn, #id_saveanddisplay, #id_submitbutton").first());
             page.waitForTimeout(900);
             if (categoryId.equals(courseCategoryId(courseId))) {
                 System.out.println("[CourseAdmin] course " + courseId + " moved to category " + categoryId);
@@ -249,11 +250,11 @@ public class CourseAdmin extends BasePage {
     }
 
     /**
-     * Moodle 4.x async course copy. Returns the new course id once copyprogress finishes
-     * or the shortname appears in course search.
+     * Moodle 4.x async course copy via Course navigation → More → Course reuse → Course copy.
+     * Returns the new course id once copyprogress finishes or the copy appears in course search.
      */
     public String duplicateCourse(String courseId, String fullName, String shortName, String categoryId) {
-        navigate("/backup/copy.php?id=" + courseId);
+        openCopyCourseFormViaCourseReuse(courseId);
         Locator fullname = page.locator("#id_fullname");
         fullname.waitFor(new Locator.WaitForOptions()
                 .setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
@@ -263,38 +264,154 @@ public class CourseAdmin extends BasePage {
                 && page.locator("#id_category").count() > 0) {
             setSelectValue("#id_category", categoryId);
         }
-        Locator submit = page.locator("#id_submitdisplay, #id_submitreturn, #id_submitbutton");
-        if (submit.count() == 0) {
-            submit = page.locator("button[type='submit']:visible, input[type='submit']:visible");
+        Locator submitReturn = page.locator("#id_submitreturn, input[name='submitreturn'], "
+                + "button:has-text('Copy and return'), input[value='Copy and return']");
+        if (safeCount("#id_submitreturn, input[name='submitreturn']") == 0
+                && safeCount("button:has-text('Copy and return'), input[value='Copy and return']") == 0) {
+            throw new AssertionError("Course copy form missing 'Copy and return' (courseId=" + courseId
+                    + ", url=" + currentUrlSafe() + ")");
         }
-        submit.first().click();
+        clickSlowSubmit(submitReturn.first());
+        return waitForDuplicateCourseId(courseId, fullName, shortName);
+    }
+
+    private static final String COPY_PROGRESS_CONTINUE = "button:has-text('Continue'), input[value='Continue'], "
+            + "a:has-text('Continue'), button:has-text('View course'), a:has-text('View course')";
+
+    private String waitForDuplicateCourseId(String sourceCourseId, String fullName, String shortName) {
         long deadline = System.currentTimeMillis() + 300_000;
         long nextLookup = System.currentTimeMillis() + 8_000;
         while (System.currentTimeMillis() < deadline) {
             page.waitForTimeout(2_000);
-            String url = page.url().toLowerCase(java.util.Locale.ROOT);
-            String id = param(page.url(), "id");
-            if (url.contains("/course/view.php") && id != null && !id.equals(courseId)) return id;
-            Locator continueButton = page.locator("button:has-text('Continue'), input[value='Continue'], "
-                    + "a:has-text('Continue'), button:has-text('View course'), a:has-text('View course')");
-            if (continueButton.count() > 0 && continueButton.first().isVisible()) {
-                continueButton.first().click();
-                page.waitForTimeout(1_000);
-                continue;
-            }
-            if (System.currentTimeMillis() >= nextLookup) {
-                // Probe in a second authenticated page. Navigating the progress page away can stop
-                // Moodle's JS poller, and standard course search normally renders fullname rather
-                // than shortname.
-                String found = findCopiedCourseId(fullName, shortName, courseId);
-                if (found != null && !found.equals(courseId)) return found;
-                nextLookup = System.currentTimeMillis() + 10_000;
+            try {
+                String url = currentUrlSafe();
+                String pageUrl = url.isEmpty() ? "" : page.url();
+                String id = param(pageUrl, "id");
+                if (url.contains("/course/view.php") && id != null && !id.equals(sourceCourseId)) {
+                    return id;
+                }
+                if (safeCount(COPY_PROGRESS_CONTINUE) > 0) {
+                    Locator continueButton = page.locator(COPY_PROGRESS_CONTINUE).first();
+                    try {
+                        if (continueButton.isVisible()) {
+                            clickSlowSubmit(continueButton);
+                            page.waitForTimeout(1_000);
+                            continue;
+                        }
+                    } catch (RuntimeException clickFailed) {
+                        if (!contextDestroyed(clickFailed)) throw clickFailed;
+                    }
+                }
+                if (System.currentTimeMillis() >= nextLookup) {
+                    String found = findCopiedCourseId(fullName, shortName, sourceCourseId);
+                    if (found != null && !found.equals(sourceCourseId)) return found;
+                    nextLookup = System.currentTimeMillis() + 10_000;
+                }
+            } catch (RuntimeException navigating) {
+                if (!contextDestroyed(navigating)) throw navigating;
             }
         }
-        String body = page.locator("body").innerText();
-        throw new AssertionError("course copy did not complete within 300s (source=" + courseId
-                + ", fullname=" + fullName + ", shortname=" + shortName + ", page=" + page.url()
+        String body = safeBodyText();
+        throw new AssertionError("course copy did not complete within 300s (source=" + sourceCourseId
+                + ", fullname=" + fullName + ", shortname=" + shortName + ", page=" + currentUrlSafe()
                 + ", status=" + body.substring(0, Math.min(body.length(), 400)).replaceAll("\\s+", " ") + ")");
+    }
+
+    private String currentUrlSafe() {
+        try {
+            return page.url().toLowerCase(java.util.Locale.ROOT);
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    private String safeBodyText() {
+        for (int attempt = 0; attempt < 6; attempt++) {
+            try {
+                return page.locator("body").innerText();
+            } catch (RuntimeException e) {
+                if (attempt == 5) return "";
+                page.waitForTimeout(400);
+            }
+        }
+        return "";
+    }
+
+    private static boolean contextDestroyed(RuntimeException e) {
+        String msg = e.getMessage() == null ? "" : e.getMessage();
+        return msg.contains("Execution context was destroyed") || msg.contains("Target closed");
+    }
+
+    /** Open the source course, use More → Course reuse, then choose Course copy. */
+    private void openCopyCourseFormViaCourseReuse(String courseId) {
+        navigate("/course/view.php?id=" + courseId);
+        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        if (!openCourseReuseFromMoreMenu()) {
+            // More-menu items are often present in DOM but not visible (collapsed nav); navigate directly.
+            navigate("/backup/view.php?id=" + courseId);
+            waitForCourseReusePage(30_000);
+            if (!page.url().contains("backup/view.php")) {
+                throw new AssertionError("Could not open Course reuse (courseId=" + courseId
+                        + ", url=" + page.url() + ")");
+            }
+        }
+        page.locator("h2, .page-header-headings, #region-main").first().waitFor(new Locator.WaitForOptions()
+                .setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
+        Locator copyCourse = page.locator("a[href*='backup/copy.php'], "
+                + ".list-group-item-action:has-text('Course copy'), "
+                + "a:has-text('Course copy'), a:has-text('Copy course')");
+        copyCourse.first().waitFor(new Locator.WaitForOptions()
+                .setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
+        copyCourse.first().click();
+        page.locator("#id_fullname").waitFor(new Locator.WaitForOptions()
+                .setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
+    }
+
+    /** Course navigation → More → Course reuse (Moodle 4.x secondary/tertiary nav). */
+    private boolean openCourseReuseFromMoreMenu() {
+        Locator moreToggles = page.locator(
+                ".secondary-navigation .dropdown-toggle:visible, "
+                        + ".tertiary-navigation .dropdown-toggle:visible, "
+                        + "nav .dropdown-toggle:has-text('More'):visible, "
+                        + "button:has-text('More'):visible, "
+                        + "a.dropdown-toggle:has-text('More'):visible");
+        int n = moreToggles.count();
+        for (int i = 0; i < n; i++) {
+            Locator toggle = moreToggles.nth(i);
+            try {
+                if (!toggle.isVisible()) continue;
+                toggle.click();
+                page.waitForTimeout(400);
+                Locator reuse = page.locator(
+                        ".dropdown-menu.show a[href*='backup/view.php'], "
+                                + ".dropdown-menu.show a:has-text('Course reuse'), "
+                                + "[role='menu'] a:has-text('Course reuse'), "
+                                + "a.dropdown-item:has-text('Course reuse')").first();
+                if (reuse.count() > 0) {
+                    try {
+                        if (reuse.isVisible()) {
+                            reuse.click();
+                            waitForCourseReusePage(15_000);
+                            return true;
+                        }
+                    } catch (RuntimeException ignored) {
+                        reuse.click(new Locator.ClickOptions().setNoWaitAfter(true));
+                        waitForCourseReusePage(15_000);
+                        return true;
+                    }
+                }
+                page.keyboard().press("Escape");
+            } catch (RuntimeException ignored) {
+                page.keyboard().press("Escape");
+            }
+        }
+        return page.url().contains("backup/view.php");
+    }
+
+    private void waitForCourseReusePage(long timeoutMs) {
+        if (page.url().contains("backup/view.php")) return;
+        page.waitForURL(u -> u.contains("backup/view.php"),
+                new Page.WaitForURLOptions().setTimeout(timeoutMs));
     }
 
     /** Best-effort lookup in a separate page so the async-copy progress page keeps polling. */
@@ -334,10 +451,7 @@ public class CourseAdmin extends BasePage {
         Locator confirm = page.locator("#id_submitbutton, button:has-text('Delete'), "
                 + "input[value='Delete'], button:has-text('Continue')").first();
         if (confirm.count() > 0) {
-            confirm.click();
-            try {
-                page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
-            } catch (RuntimeException ignored) {}
+            submitAndAwaitNewPage(confirm);
         }
     }
 
@@ -381,17 +495,9 @@ public class CourseAdmin extends BasePage {
         expandAll();
         page.locator("#id_name").fill(name);
         page.locator("#id_externalurl").fill("https://example.com");
-        if (manualCompletion) {
-            // The Activity completion radios live in a (possibly collapsed) fieldset; set via JS so
-            // visibility never blocks it. id_completion_1 = "Students can manually mark as complete".
-            page.locator("#id_completion_1").evaluate(
-                    "el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles:true})); }");
-        }
-        if (availabilityJson != null) {
-            page.locator("[name='availabilityconditionsjson']").evaluate("(el, v) => { el.value = v; }", availabilityJson);
-        }
-        page.locator("#id_submitbutton").click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        applyManualCompletion(manualCompletion);
+        applyAvailabilityJson(availabilityJson);
+        submitAndAwaitNewPage(page.locator("#id_submitbutton"));
         page.waitForTimeout(2_000);
         String cmid = param(page.url(), "id");
         if (cmid == null) {
@@ -401,13 +507,543 @@ public class CourseAdmin extends BasePage {
         return cmid;
     }
 
+    /**
+     * Add a CloudLabs <strong>assessment</strong> activity ({@code labtype=challenge}, not sandbox/playground).
+     * Sets manual completion and optional restrict-access JSON. Shows the activity on the course page.
+     * Returns the course-module id (cmid).
+     */
+    public String addCloudlabsAssessmentActivity(String courseId, String name, boolean manualCompletion,
+                                                 String availabilityJson) {
+        ChallengeActivityForm form = new ChallengeActivityForm(page);
+        if (!form.openAddFormDirect(courseId)) {
+            throw new IllegalStateException("cloudlabs assessment add form did not open for course " + courseId);
+        }
+        AssessmentCreateSpec spec = new AssessmentCreateSpec.Builder()
+                .name(name)
+                .labType("challenge")
+                .instructions("Sequential activity completion fixture.")
+                .evaluationType("ANSWER")
+                .challengeAnswer("SAC fixture answer")
+                .challengeMarks("10")
+                .templateContains(SAC_ASSESSMENT_TEMPLATE)
+                .gradeToPass("30")
+                .build();
+        form.fill(spec);
+        expandAll();
+        applyManualCompletion(manualCompletion);
+        applyAvailabilityJson(availabilityJson);
+        form.saveAndDisplay();
+        page.waitForTimeout(2_000);
+        if (page.url().contains("modedit.php")) {
+            throw new IllegalStateException("addCloudlabsAssessmentActivity '" + name + "' did not save (url="
+                    + page.url() + ") — " + modEditValidationHint());
+        }
+        String cmid = form.activityCmidFromUrl();
+        if (cmid == null) {
+            cmid = resolveCloudlabsActivityCmid(name);
+        }
+        if (cmid == null) {
+            throw new IllegalStateException("addCloudlabsAssessmentActivity '" + name
+                    + "' saved but cmid not found (url=" + page.url() + ")");
+        }
+        new CourseView(page).showActivityOnCoursePage(courseId, Integer.parseInt(cmid), name);
+        return cmid;
+    }
+
+    /** How Activity 1 completion is tracked for Practice Project sequential-completion fixtures. */
+    public enum PracticeCompletionMode {
+        /** Moodle manual completion — student marks as done on the course page. */
+        MANUAL_MARK,
+        /** Automatic completion when the student completes the Practice Project activity (submit attempt). */
+        STUDENT_MUST_COMPLETE
+    }
+
+    /**
+     * CloudLabs Practice Project ({@code labtype=guided}) for sequential restrict-access tests (no grade rules).
+     */
+    public String addCloudlabsPracticeProjectActivity(String courseId, String name,
+                                                        PracticeCompletionMode mode, String availabilityJson) {
+        ChallengeActivityForm form = new ChallengeActivityForm(page);
+        if (!form.openAddFormDirect(courseId)) {
+            throw new IllegalStateException("cloudlabs practice project add form did not open for course " + courseId);
+        }
+        page.locator("#id_name").fill(name);
+        pickModEditRadio("labtype", "guided");
+        selectFirstLabTemplateOption();
+        pickModEditRadio("practiceprojecttype", "withoutprogresstracking");
+        expandAll();
+        if (mode == PracticeCompletionMode.MANUAL_MARK) {
+            applyManualCompletion(true);
+        }
+        // STUDENT_MUST_COMPLETE is applied on a second modedit pass after cmid is known (keeps first save minimal).
+        applyAvailabilityJson(availabilityJson);
+        form.saveAndDisplay();
+        page.waitForTimeout(2_000);
+        if (page.url().contains("modedit.php")) {
+            throw new IllegalStateException("addCloudlabsPracticeProjectActivity '" + name + "' did not save (url="
+                    + page.url() + ") — " + modEditValidationHint());
+        }
+        String cmid = resolvePracticeProjectCmidAfterSave(form, courseId, name);
+        if (mode == PracticeCompletionMode.STUDENT_MUST_COMPLETE) {
+            ensurePracticeProjectSubmitCompletion(cmid);
+        }
+        new CourseView(page).showActivityOnCoursePage(courseId, Integer.parseInt(cmid), name);
+        return cmid;
+    }
+
+    /** After save-and-display, recover cmid even when the browser lands on a transient error page. */
+    private String resolvePracticeProjectCmidAfterSave(ChallengeActivityForm form, String courseId,
+                                                       String activityName) {
+        String cmid = form.activityCmidFromUrl();
+        if (cmid == null) {
+            cmid = resolveCloudlabsActivityCmid(activityName);
+        }
+        if (cmid == null) {
+            cmid = resolveCloudlabsActivityCmidFromCourse(courseId, activityName);
+        }
+        if (cmid != null) {
+            return cmid;
+        }
+        throw new IllegalStateException("addCloudlabsPracticeProjectActivity '" + activityName
+                + "' saved but cmid not found (url=" + page.url() + ")");
+    }
+
+    /** Find a cloudlabs activity cmid on the course page by activity title. */
+    private String resolveCloudlabsActivityCmidFromCourse(String courseId, String activityName) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                navigate("/course/view.php?id=" + courseId);
+                page.waitForTimeout(2_000);
+                Locator row = page.locator("li.activity, .activity-item")
+                        .filter(new Locator.FilterOptions().setHasText(activityName)).first();
+                if (row.count() > 0) {
+                    String dataId = row.getAttribute("data-id");
+                    if (dataId != null && dataId.matches("\\d+")) {
+                        return dataId;
+                    }
+                    Locator link = row.locator("a[href*='/mod/cloudlabs/view.php?id=']");
+                    if (link.count() > 0) {
+                        Matcher mm = Pattern.compile("id=(\\d+)").matcher(link.first().getAttribute("href"));
+                        if (mm.find()) {
+                            return mm.group(1);
+                        }
+                    }
+                }
+                Locator links = page.locator("a[href*='/mod/cloudlabs/view.php?id=']");
+                for (int i = 0; i < links.count(); i++) {
+                    String text = links.nth(i).innerText().trim();
+                    if (!text.contains(activityName)) {
+                        continue;
+                    }
+                    Matcher mm = Pattern.compile("id=(\\d+)").matcher(links.nth(i).getAttribute("href"));
+                    if (mm.find()) {
+                        return mm.group(1);
+                    }
+                }
+            } catch (RuntimeException e) {
+                System.out.println("[SAC-PP] course cmid lookup attempt " + attempt + ": " + e.getMessage());
+            }
+            page.waitForTimeout(2_000);
+        }
+        return null;
+    }
+
+    /** Re-save submit-based completion on modedit (Moodle sometimes drops it on first guided save). */
+    private void ensurePracticeProjectSubmitCompletion(String cmid) {
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                navigate("/course/modedit.php?update=" + cmid + "&return=0");
+                page.locator("#id_submitbutton").first()
+                        .waitFor(new Locator.WaitForOptions().setState(WaitForSelectorState.VISIBLE)
+                                .setTimeout(45_000));
+                applyStudentMustCompleteActivityOnForm();
+                Locator save = page.locator("#id_submitbutton");
+                submitAndAwaitNewPage(save);
+                page.waitForTimeout(1_500);
+                System.out.println("[SAC-PP] Activity cmid=" + cmid
+                        + " completion=student must complete/submit");
+                return;
+            } catch (RuntimeException e) {
+                if (attempt == 2) {
+                    throw e;
+                }
+                System.out.println("[SAC-PP] completion re-save retry: " + e.getMessage());
+                page.waitForTimeout(3_000);
+            }
+        }
+    }
+
+    /**
+     * CloudLabs assessment ({@code challenge}) with Moodle grade-based activity completion (not sandbox).
+     * Uses MANUAL evaluation so the teacher can set the submission grade after the student submits once.
+     */
+    public String addGradedCloudlabsAssessmentActivity(String courseId, String name, GradeCompletion cond,
+                                                       int passMark, String availabilityJson) {
+        ChallengeActivityForm form = new ChallengeActivityForm(page);
+        if (!form.openAddFormDirect(courseId)) {
+            throw new IllegalStateException("cloudlabs assessment add form did not open for course " + courseId);
+        }
+        int effectivePass = passMark > 0 ? passMark : 50;
+        String gradeToPass = (cond == GradeCompletion.PASSING_GRADE || cond == GradeCompletion.GRADE_AND_MANUAL)
+                ? String.valueOf(effectivePass) : "50";
+        AssessmentCreateSpec spec = new AssessmentCreateSpec.Builder()
+                .name(name)
+                .labType("challenge")
+                .evaluationType("MANUAL")
+                .submissionsAllowed("1")
+                .attemptsAllowed("1")
+                .instructions("SAC grade-based sequential completion fixture.")
+                .templateContains(SAC_ASSESSMENT_TEMPLATE)
+                .gradeToPass(gradeToPass)
+                .build();
+        form.fill(spec);
+        expandAll();
+        applyGradeCompletionOnForm(cond, passMark);
+        applyAvailabilityJson(availabilityJson);
+        form.saveAndDisplay();
+        page.waitForTimeout(2_000);
+        if (page.url().contains("modedit.php")) {
+            throw new IllegalStateException("addGradedCloudlabsAssessmentActivity '" + name + "' did not save");
+        }
+        String cmid = form.activityCmidFromUrl();
+        if (cmid == null) {
+            cmid = resolveCloudlabsActivityCmid(name);
+        }
+        if (cmid == null) {
+            throw new IllegalStateException("addGradedCloudlabsAssessmentActivity '" + name
+                    + "' saved but cmid not found (url=" + page.url() + ")");
+        }
+        if (cond == GradeCompletion.GRADE_AND_MANUAL) {
+            ensureSacManualMarkAndPassingGradeCompletion(cmid, effectivePass);
+        }
+        new CourseView(page).showActivityOnCoursePage(courseId, Integer.parseInt(cmid), name);
+        return cmid;
+    }
+
+    private void applyGradeCompletionOnForm(GradeCompletion cond, int passMark) {
+        int pass = passMark > 0 ? passMark : 50;
+        if (cond == GradeCompletion.GRADE_AND_MANUAL) {
+            applySacManualMarkAndPassingGradeOnForm(pass);
+            return;
+        }
+        applyAutomaticPassingGradeCompletionOnForm(cond == GradeCompletion.PASSING_GRADE ? pass : 0);
+    }
+
+    /**
+     * SAC-6/7/8: Activity 1 counts complete only when the student marks as done on the course page
+     * <strong>and</strong> has a teacher grade at or above the passing mark. Activity 2 uses a single
+     * "Activity 1 complete" restrict rule ({@link #requireCompleteJson}).
+     */
+    private void applySacManualMarkAndPassingGradeOnForm(int passMark) {
+        ensureModEditFormExpanded();
+        applyAutomaticPassingGradeCompletionOnForm(passMark);
+        selectCompletionRadio(1);
+        page.waitForTimeout(500);
+        forceGradeCompletionFieldValues(passMark, true, true);
+    }
+
+    /** Re-apply SAC manual + passing rules on modedit so they persist after save (Moodle form quirk). */
+    private void ensureSacManualMarkAndPassingGradeCompletion(String cmid, int passMark) {
+        navigate("/course/modedit.php?update=" + cmid + "&return=0");
+        page.locator("#id_submitbutton").first()
+                .waitFor(new Locator.WaitForOptions().setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
+        applySacManualMarkAndPassingGradeOnForm(passMark);
+        Locator save = page.locator("#id_submitbutton");
+        submitAndAwaitNewPage(save);
+        page.waitForTimeout(1_500);
+        System.out.println("[SAC-grade] Activity 1 cmid=" + cmid
+                + " completion=manual mark-as-done + require passing grade " + passMark);
+        System.out.println("[SAC-grade] persisted completion settings: " + readPersistedCompletion(cmid));
+    }
+
+    /** Re-open modedit and report what Moodle actually stored (core can drop grade rules under manual completion). */
+    public String readPersistedCompletion(String cmid) {
+        try {
+            navigate("/course/modedit.php?update=" + cmid + "&return=0");
+            page.locator("#id_submitbutton").first()
+                    .waitFor(new Locator.WaitForOptions().setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
+            ensureModEditFormExpanded();
+            Object r = page.evaluate("() => {"
+                    + " const q = s => document.querySelector(s);"
+                    + " const radio = document.querySelector('input[name=\"completion\"]:checked');"
+                    + " const ug = q('#id_completionusegrade'); const pg = q('#id_completionpassgrade_1');"
+                    + " const gp = q('#id_gradepass');"
+                    + " return 'completion=' + (radio ? radio.value : '?')"
+                    + "  + ' usegrade=' + (ug ? ug.checked : 'n/a')"
+                    + "  + ' passgrade=' + (pg ? pg.checked : 'n/a')"
+                    + "  + ' gradepass=' + (gp ? gp.value : 'n/a'); }");
+            return String.valueOf(r);
+        } catch (RuntimeException e) {
+            return "unreadable: " + e.getMessage();
+        }
+    }
+
+    /** Automatic completion + require grade; optional require passing grade when {@code passMark > 0}. */
+    private void applyAutomaticPassingGradeCompletionOnForm(int passMark) {
+        ensureModEditFormExpanded();
+        selectCompletionRadio(2);
+        page.waitForTimeout(400);
+        applyRequireGradeCompletionOnForm(true);
+        if (passMark > 0) {
+            applyPassingGradeCompletionOnForm(passMark);
+        }
+    }
+
+    private void selectCompletionRadio(int value) {
+        String sel = value == 1 ? "#id_completion_1" : "#id_completion_2";
+        Locator radio = page.locator(sel);
+        if (radio.count() == 0) {
+            throw new IllegalStateException("completion radio " + sel + " not on modedit form");
+        }
+        try {
+            radio.first().scrollIntoViewIfNeeded();
+            radio.first().click(new Locator.ClickOptions().setForce(true));
+        } catch (RuntimeException e) {
+            radio.first().evaluate(
+                    "el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles:true})); }");
+        }
+        page.waitForTimeout(300);
+    }
+
+    private void applyRequireGradeCompletionOnForm(boolean forceEnable) {
+        page.locator("#id_completionusegrade").evaluate(
+                "(el, force) => { if (force) el.disabled = false; if (!el.disabled || force) { el.checked = true;"
+                        + " el.dispatchEvent(new Event('change', {bubbles:true})); } }",
+                forceEnable);
+    }
+
+    private void applyPassingGradeCompletionOnForm(int passMark) {
+        page.locator("#id_completionpassgrade_1").evaluate(
+                "el => { el.disabled = false; el.checked = true;"
+                        + " el.dispatchEvent(new Event('change', {bubbles:true})); }");
+        forceGradePassInputs(passMark);
+    }
+
+    private void forceGradePassInputs(int passMark) {
+        page.evaluate(
+                "(pass) => {"
+                        + "  const v = String(pass);"
+                        + "  document.querySelectorAll('#id_gradepass, input[name=\"gradepass\"]').forEach(el => {"
+                        + "    el.disabled = false; el.readOnly = false; el.value = v;"
+                        + "    el.dispatchEvent(new Event('input', {bubbles:true}));"
+                        + "    el.dispatchEvent(new Event('change', {bubbles:true}));"
+                        + "  });"
+                        + "}",
+                passMark);
+    }
+
+    private void forceGradeCompletionFieldValues(int passMark, boolean requireGrade, boolean requirePassing) {
+        page.evaluate(
+                "(opts) => {"
+                        + "  const fire = el => el.dispatchEvent(new Event('change', {bubbles:true}));"
+                        + "  if (opts.requireGrade) {"
+                        + "    const ug = document.querySelector('#id_completionusegrade');"
+                        + "    if (ug) { ug.disabled = false; ug.checked = true; fire(ug); }"
+                        + "  }"
+                        + "  if (opts.requirePassing) {"
+                        + "    const pg = document.querySelector('#id_completionpassgrade_1,"
+                        + "      input[name=\"completionpassgrade\"][value=\"1\"]');"
+                        + "    if (pg) { pg.disabled = false; pg.checked = true; fire(pg); }"
+                        + "  }"
+                        + "  if (opts.passMark > 0) {"
+                        + "    document.querySelectorAll('#id_gradepass, input[name=\"gradepass\"]').forEach(el => {"
+                        + "      el.disabled = false; el.value = String(opts.passMark);"
+                        + "      el.dispatchEvent(new Event('input', {bubbles:true})); fire(el);"
+                        + "    });"
+                        + "  }"
+                        + "}",
+                java.util.Map.of("passMark", passMark, "requireGrade", requireGrade, "requirePassing", requirePassing));
+    }
+
+    private void applyManualCompletion(boolean manualCompletion) {
+        if (!manualCompletion) return;
+        page.locator("#id_completion_1").evaluate(
+                "el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles:true})); }");
+    }
+
+    /** Automatic completion: student must complete/submit the Practice Project (not grade-based). */
+    private void applyStudentMustCompleteActivityOnForm() {
+        ensureModEditFormExpanded();
+        selectCompletionRadio(2);
+        page.waitForTimeout(400);
+        page.evaluate(
+                "() => {"
+                        + "  const fire = el => el.dispatchEvent(new Event('change', {bubbles:true}));"
+                        + "  const box = document.querySelector('#id_completionsubmit');"
+                        + "  if (box) { box.disabled = false; box.checked = true; fire(box); return; }"
+                        + "  for (const el of document.querySelectorAll("
+                        + "      '#id_activitycompletioncontainer input[type=checkbox],"
+                        + "       fieldset[id*=completion] input[type=checkbox]')) {"
+                        + "    const id = (el.id || '').toLowerCase();"
+                        + "    const name = (el.name || '').toLowerCase();"
+                        + "    if (id.includes('grade') || name.includes('grade') || name.includes('pass')) continue;"
+                        + "    const row = el.closest('.fitem, .form-group, .form-check');"
+                        + "    const label = (row && row.innerText ? row.innerText : '').toLowerCase();"
+                        + "    if (label.includes('grade') || label.includes('passing')) continue;"
+                        + "    if (name.includes('submit') || id.includes('submit') || label.includes('complete')) {"
+                        + "      el.disabled = false; el.checked = true; fire(el); return;"
+                        + "    }"
+                        + "  }"
+                        + "}");
+    }
+
+    private void pickModEditRadio(String name, String value) {
+        Locator radio = page.locator("input[type=radio][name='" + name + "'][value='" + value + "']").first();
+        if (radio.count() == 0) {
+            throw new IllegalStateException("modedit radio " + name + "=" + value + " not found");
+        }
+        radio.check(new Locator.CheckOptions().setForce(true));
+        page.waitForTimeout(400);
+    }
+
+    private void selectFirstLabTemplateOption() {
+        Locator sel = page.locator("#id_lab_template_id");
+        if (sel.count() == 0) return;
+        @SuppressWarnings("unchecked")
+        java.util.List<Object> values = (java.util.List<Object>) sel.locator("option")
+                .evaluateAll("els => els.map(o => o.value)");
+        for (Object v : values) {
+            if (v != null && !v.toString().isBlank() && !"0".equals(v.toString())) {
+                sel.selectOption(v.toString());
+                return;
+            }
+        }
+    }
+
+    private void applyAvailabilityJson(String availabilityJson) {
+        if (availabilityJson == null) return;
+        page.locator("[name='availabilityconditionsjson']").evaluate("(el, v) => { el.value = v; }",
+                availabilityJson);
+    }
+
+    private String resolveCloudlabsActivityCmid(String activityName) {
+        String cmid = param(page.url(), "id");
+        if (cmid != null) return cmid;
+        Matcher m = Pattern.compile("/mod/cloudlabs/view\\.php\\?id=(\\d+)").matcher(page.url());
+        if (m.find()) return m.group(1);
+        Matcher update = Pattern.compile("[?&]update=(\\d+)").matcher(page.url());
+        if (update.find()) return update.group(1);
+        Locator links = page.locator("a[href*='/mod/cloudlabs/view.php']");
+        for (int i = 0; i < links.count(); i++) {
+            String text = links.nth(i).innerText().trim();
+            if (!text.contains(activityName)) continue;
+            Matcher mm = Pattern.compile("id=(\\d+)").matcher(links.nth(i).getAttribute("href"));
+            if (mm.find()) return mm.group(1);
+        }
+        return null;
+    }
+
     /** availabilityconditionsjson for "activity {cmid} must be marked complete" (e=1), shown greyed. */
     public static String requireCompleteJson(String dependsOnCmid) {
         return "{\"op\":\"&\",\"c\":[{\"type\":\"completion\",\"cm\":" + dependsOnCmid + ",\"e\":1}],\"showc\":[true]}";
     }
 
+    /**
+     * SAC-6/7/8: Activity 2 unlocks only when Activity 1 is marked complete on the course page
+     * <strong>and</strong> the student has at least {@code minGrade} on Activity 1's gradebook item.
+     */
+    public static String requireCompleteAndMinGradeJson(String activity1Cmid, String gradeItemId, int minGrade) {
+        return "{\"op\":\"&\",\"c\":["
+                + "{\"type\":\"completion\",\"cm\":" + activity1Cmid + ",\"e\":1},"
+                + "{\"type\":\"grade\",\"id\":" + gradeItemId + ",\"min\":" + minGrade + "}"
+                + "],\"showc\":[true,true]}";
+    }
+
+    /** Resolve the gradebook item id for a course activity (restrict-access grade conditions). */
+    public String resolveGradeItemIdForNamedActivity(String courseId, String activityName) {
+        return resolveGradeItemIdForNamedActivity(courseId, null, activityName);
+    }
+
+    public String resolveGradeItemIdForNamedActivity(String courseId, String activityCmid, String activityName) {
+        String[] treeUrls = {
+                "/grade/edit/tree/index.php?id=" + courseId,
+                "/grade/edit/tree/index.php?courseid=" + courseId,
+        };
+        for (String path : treeUrls) {
+            navigate(path);
+            page.waitForTimeout(3_000);
+            String id = scanGradeItemIdOnPage(activityName);
+            if (id != null) return id;
+        }
+        navigate("/grade/report/grader/index.php?id=" + courseId);
+        page.waitForTimeout(3_000);
+        String id = scanGradeItemIdOnPage(activityName);
+        if (id != null) return id;
+        try {   // diagnostics for the next run: what did the grader report actually contain?
+            java.nio.file.Files.writeString(java.nio.file.Path.of("target", "gradeitem-debug-" + courseId + ".html"),
+                    page.content());
+        } catch (Exception ignored) { }
+        if (activityCmid != null && !activityCmid.isBlank()) {
+            id = resolveGradeItemIdViaActivityModEdit(activityCmid, activityName);
+            if (id != null) return id;
+        }
+        return null;
+    }
+
+    private String scanGradeItemIdOnPage(String activityName) {
+        Object raw = page.evaluate(
+                "(want) => {"
+                        + "  const needle = (want || '').toLowerCase();"
+                        + "  const idFromHref = (href) => {"
+                        + "    const m = (href || '').match(/[?&]id=(\\d+)/);"
+                        + "    return m ? m[1] : null;"
+                        + "  };"
+                        + "  const links = document.querySelectorAll("
+                        + "    'a[href*=\"grade/edit/tree/item.php\"], a[href*=\"item.php?id=\"]');"
+                        + "  for (const a of links) {"
+                        + "    const t = (a.textContent || '').trim().toLowerCase();"
+                        + "    if (needle && t.includes(needle)) return idFromHref(a.getAttribute('href') || a.href);"
+                        + "  }"
+                        + "  for (const row of document.querySelectorAll('tr, li, .gradeitem')) {"
+                        + "    const t = (row.textContent || '').toLowerCase();"
+                        + "    if (needle && !t.includes(needle)) continue;"
+                        + "    const a = row.querySelector('a[href*=\"item.php\"]');"
+                        + "    if (a) { const id = idFromHref(a.getAttribute('href') || a.href); if (id) return id; }"
+                        + "  }"
+                        // grader-report headers / setup rows expose the item id as data-itemid or an "i123" eid
+                        + "  for (const el of document.querySelectorAll('[data-itemid]')) {"
+                        + "    const t = (el.textContent || '').toLowerCase();"
+                        + "    if (needle && t.includes(needle) && /^\\d+$/.test(el.getAttribute('data-itemid'))) {"
+                        + "      return el.getAttribute('data-itemid');"
+                        + "    }"
+                        + "  }"
+                        + "  for (const el of document.querySelectorAll('[data-eid], tr[id], [id^=\"grade-item-\"]')) {"
+                        + "    const t = (el.textContent || '').toLowerCase();"
+                        + "    if (needle && !t.includes(needle)) continue;"
+                        + "    const key = el.getAttribute('data-eid') || el.id || '';"
+                        + "    const m = key.match(/(?:^|[^a-z])i(?:tem)?[-_]?(\\d+)$/i);"
+                        + "    if (m) return m[1];"
+                        + "  }"
+                        + "  return null;"
+                        + "}",
+                activityName);
+        return raw != null ? String.valueOf(raw) : null;
+    }
+
+    /** Last resort: open the activity modedit and follow the grade-item link if present. */
+    private String resolveGradeItemIdViaActivityModEdit(String activityCmid, String activityName) {
+        navigate("/course/modedit.php?update=" + activityCmid + "&return=0");
+        page.waitForTimeout(2_000);
+        ensureModEditFormExpanded();
+        String id = scanGradeItemIdOnPage(activityName);
+        if (id != null) return id;
+        Locator gradeLinks = page.locator("a[href*='grade/edit/tree/item.php'], a[href*='item.php?id=']");
+        for (int i = 0; i < gradeLinks.count(); i++) {
+            String href = gradeLinks.nth(i).getAttribute("href");
+            Matcher m = Pattern.compile("[?&]id=(\\d+)").matcher(href == null ? "" : href);
+            if (m.find()) return m.group(1);
+        }
+        return null;
+    }
+
+    /** Restrict until two prior activities are marked complete. */
+    public static String requireTwoCompleteJson(String cmid1, String cmid2) {
+        return "{\"op\":\"&\",\"c\":[{\"type\":\"completion\",\"cm\":" + cmid1 + ",\"e\":1},"
+                + "{\"type\":\"completion\",\"cm\":" + cmid2 + ",\"e\":1}],\"showc\":[true,true]}";
+    }
+
     /** Activity 1 completion condition for the grade-based sequential cases. */
-    public enum GradeCompletion { ANY_GRADE, PASSING_GRADE }
+    public enum GradeCompletion { ANY_GRADE, PASSING_GRADE, GRADE_AND_MANUAL }
 
     /**
      * Add an Assignment whose completion is grade-based (automatic completion + "require grade", and for
@@ -421,21 +1057,11 @@ public class CourseAdmin extends BasePage {
         page.locator("#id_name").waitFor(new Locator.WaitForOptions()
                 .setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
         page.locator("#id_name").fill(name);
-        // automatic completion + require grade
-        page.locator("#id_completion_2").evaluate(
-                "el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles:true})); }");
-        page.locator("#id_completionusegrade").evaluate(
-                "el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles:true})); }");
-        if (cond == GradeCompletion.PASSING_GRADE) {
-            page.locator("#id_completionpassgrade_1").evaluate(
-                    "el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles:true})); }");
-            page.locator("#id_gradepass").evaluate("(el, v) => { el.value = v; }", String.valueOf(passMark));
-        }
+        applyGradeCompletionOnForm(cond, passMark);
         if (availabilityJson != null) {
             page.locator("[name='availabilityconditionsjson']").evaluate("(el, v) => { el.value = v; }", availabilityJson);
         }
-        page.locator("#id_submitbutton").click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(page.locator("#id_submitbutton"));
         page.waitForTimeout(2_000);
         String cmid = param(page.url(), "id");
         if (cmid == null) {
@@ -459,8 +1085,7 @@ public class CourseAdmin extends BasePage {
         gradeInput.fill(String.valueOf(grade));
         Locator save = page.locator("#id_savechanges");
         if (save.count() == 0) save = page.locator("button:has-text('Save changes'), input[value='Save changes']");
-        save.first().click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(save.first());
         page.waitForTimeout(2_500);
     }
 
@@ -556,8 +1181,7 @@ public class CourseAdmin extends BasePage {
                 throw new AssertionError("Restore control not found after uploading " + mbz.getFileName()
                         + " url=" + page.url() + " controls: " + controlsSnapshot());
             }
-            restore.click();
-            page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+            clickSlowSubmit(restore);
         }
         page.waitForTimeout(1_500);
         long deadline = System.currentTimeMillis() + 420_000;
@@ -1085,8 +1709,7 @@ public class CourseAdmin extends BasePage {
         Locator confirm = page.locator("button:has-text('Delete'), input[value='Delete'], "
                 + "#region-main .btn-primary, button:has-text('Continue')");
         if (confirm.count() > 0 && confirm.first().isVisible()) {
-            confirm.first().click();
-            page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+            submitAndAwaitNewPage(confirm.first());
             page.waitForTimeout(2_500);
         }
     }
@@ -1118,8 +1741,7 @@ public class CourseAdmin extends BasePage {
         if (page.locator("#id_customint6").count() > 0) {
             setSelectValue("#id_customint6", allowNewEnrolments ? "1" : "0");
         }
-        page.locator("#id_submitbutton").click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(page.locator("#id_submitbutton"));
         page.waitForTimeout(1_000);
         System.out.println("[CourseAdmin] self-enrol course=" + courseId
                 + " enabled=" + enabled + " allowNew=" + allowNewEnrolments
@@ -1144,14 +1766,51 @@ public class CourseAdmin extends BasePage {
     }
 
     private void expandAll() {
-        Locator exp = page.locator("a.collapseexpand[aria-expanded='false'], a:has-text('Expand all')");
+        ensureModEditFormExpanded();
+    }
+
+    /** Uncollapse modedit fieldsets (Activity completion / Grade) so completion controls are fillable. */
+    private void ensureModEditFormExpanded() {
         try {
-            if (exp.count() > 0) { exp.first().click(); page.waitForTimeout(500); }
+            Locator toggle = page.locator(".collapsible-actions a.collapseexpand, a:has-text('Expand all')");
+            if (toggle.count() > 0 && toggle.first().innerText().toLowerCase().contains("expand")) {
+                toggle.first().click();
+                page.waitForTimeout(150);
+            }
+            Locator collapsed = page.locator("a.collapseexpand[aria-expanded='false'], "
+                    + "fieldset .fheader a[aria-expanded='false']");
+            int n = collapsed.count();
+            for (int i = 0; i < n; i++) {
+                try { collapsed.nth(i).click(); } catch (RuntimeException ignored) {}
+            }
         } catch (RuntimeException ignored) {}
+        page.evaluate("() => {"
+                + "  document.querySelectorAll('fieldset.collapsible.collapsed, fieldset.collapsed')"
+                + "    .forEach(fs => fs.classList.remove('collapsed'));"
+                + "  document.querySelectorAll('fieldset.collapsible .fcontainer, fieldset .collapse')"
+                + "    .forEach(el => { el.classList.add('show'); el.style.display = ''; el.style.height = 'auto'; });"
+                + "  document.querySelectorAll('a.fheader, a.collapseexpand')"
+                + "    .forEach(a => a.setAttribute('aria-expanded', 'true'));"
+                + "}");
+        page.waitForTimeout(80);
     }
 
     private static String param(String url, String key) {
         Matcher m = Pattern.compile("[?&]" + key + "=([0-9]+)").matcher(url);
         return m.find() ? m.group(1) : null;
+    }
+
+    private String modEditValidationHint() {
+        try {
+            Locator err = page.locator("[id^='id_error_'], .alert-danger, .form-control-feedback");
+            if (err.count() > 0) {
+                return err.first().innerText().trim().replaceAll("\\s+", " ");
+            }
+            String body = page.locator("#region-main, .alert").first().innerText().trim();
+            if (body.length() > 200) body = body.substring(0, 200);
+            return body.isBlank() ? "validation error on modedit (no message scraped)" : body;
+        } catch (RuntimeException e) {
+            return "validation error on modedit";
+        }
     }
 }

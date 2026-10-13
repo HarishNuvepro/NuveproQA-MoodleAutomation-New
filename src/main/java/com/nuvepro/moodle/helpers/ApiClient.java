@@ -57,18 +57,42 @@ public final class ApiClient {
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
-        try {
-            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
-            String out = resp.body();
-            if (out != null && out.contains("\"exception\"")) {
-                throw new RuntimeException("WS " + function + " error: " + out);
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            try {
+                HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                String out = resp.body();
+                if (out != null && out.contains("\"exception\"")) {
+                    throw new RuntimeException("WS " + function + " error: " + out);
+                }
+                return out;
+            } catch (RuntimeException re) {
+                last = re;
+                throw re;
+            } catch (Exception e) {
+                last = new RuntimeException("WS call failed: " + function + " - " + e.getMessage(), e);
+                if (attempt < 4 && isTransientWsFailure(e)) {
+                    try {
+                        Thread.sleep(1_500L * attempt);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    continue;
+                }
+                throw last;
             }
-            return out;
-        } catch (RuntimeException re) {
-            throw re;
-        } catch (Exception e) {
-            throw new RuntimeException("WS call failed: " + function + " - " + e.getMessage(), e);
         }
+        throw last != null ? last : new RuntimeException("WS call failed: " + function);
+    }
+
+    private static boolean isTransientWsFailure(Exception e) {
+        String msg = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+        return msg.contains("header parser received no bytes")
+                || msg.contains("eof")
+                || msg.contains("connection reset")
+                || msg.contains("timed out")
+                || e instanceof java.io.EOFException;
     }
 
     private static String enc(String s) {
@@ -100,7 +124,13 @@ public final class ApiClient {
         String json = call("core_user_create_users", p);
         Matcher m = Pattern.compile("\"id\"\\s*:\\s*(\\d+)").matcher(json);
         if (!m.find()) throw new RuntimeException("createUser: no id in response: " + json);
-        return new SeededUser(Long.parseLong(m.group(1)), username, email, password);
+        SeededUser user = new SeededUser(Long.parseLong(m.group(1)), username, email, password);
+        AutomationManifest.registerUser(user.id, user.username);
+        return user;
+    }
+
+    public static boolean wsUnavailable() {
+        return Settings.WS_TOKEN == null || Settings.WS_TOKEN.isBlank();
     }
 
     /** Enrol a user into a course with the given role (5 = student by default). */

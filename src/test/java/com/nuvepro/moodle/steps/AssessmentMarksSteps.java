@@ -32,8 +32,8 @@ public class AssessmentMarksSteps {
 
     @Given("a challenge form with auto evaluation")
     public void challengeFormAutoEval() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
-        admin.openChallengeFormForAutoEval(Settings.COURSE_ID);
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
+        admin.openChallengeFormForAutoEval(ctx.assessmentCourseId());
         if (ctx.page.locator("input[type=radio][name='testcaseweightage']").count() == 0)
             throw new SkipException("Test Case Marks (testcaseweightage) radio not on this form/plugin build");
     }

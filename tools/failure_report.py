@@ -169,6 +169,8 @@ def main():
         if art:
             print(f"             logs:   {art}")
     print(f"\nWrote reports/failures.md and reports/failures.csv")
+    if bad:
+        print("Re-run failed/skipped by module: rerun generate all   (or: python tools/generate_module_rerun.py --all)")
 
 
 if __name__ == "__main__":

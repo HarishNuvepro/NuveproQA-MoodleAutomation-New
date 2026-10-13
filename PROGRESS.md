@@ -42,7 +42,7 @@ The table below is the module-level narrative; the dashboard is the source of tr
 | Roles (Moodle_Roles 90) | 10 (matrix ≈ 56 cases) | ~56 / 90 | CGAP-R (12) | enforcement gaps, broad functional |
 | Groups (Groups_Testcases 48) | 11 | ~10 / 48 | CGAP-GR (11) | cohort-sync enrolment, reports, time-based |
 | Assessment (Moodle_Assessment_Labs 327) | 16 (15 green + 1 defect red) | ~10 / 327 | CGAP-A (11) | PS-CRUD, per-testcase marks, cron, proctoring, hide-grades |
-| Pre-Delivery (Pre_Delivery_Lab_Checklist 72) | 4 green | ~4 / 72 | CGAP-PDL (4) | successful save+audit log, screenshot upload, dashboard filters |
+| Pre-Delivery (Pre_Delivery_Lab_Checklist 76) | batch 1–3 authored | ~62 Yes / 9 Partial / 5 No | CGAP-PDL (4) | green run + set LAB_READINESS_DASHBOARD_PATH if discovery skips |
 | NuveBulkMail (local_bulkmail, sheet 110) | 4 green | ~5 / 110 | CGAP-BM (3) | compose/send, templates, reminders, campaign cron (need SMTP capture) |
 | AWS_Marketplace (local_nuveawsmarketplace, 36) | 4 green + 1 defect red | ~6 / 36 | CGAP-AWS (3) | subscriptions flow, save valid config (mutates), multi-region |
 | Content_Integration_Git_URL (24) | 1 green | ~3 / 24 | CGAP-CIG (2) | git-fetch valid/invalid, all-three-lab-types matrix |
@@ -79,17 +79,17 @@ open — student can open the problem-statements admin page) · guided cmid 780 
 
 ## Sandbox lab (cloudlabs)  — tag `@provisioning` groups
 # (Code page objects may still be named Playground*; product term in features is sandbox. Tags stay @PG-* for Kiwi.)
-- ✅ **State actions** (`@stateactions`): PG-12, 15, 17, 18, 19, 33, 34, 35, 38, 49 — `sandbox_actions.feature`
+- ✅ **State actions** (`@stateactions`): PG-12, 15, 17, 18, 19, 33, 34, 35, 38, 49 — `sandbox.feature`
 - ✅ **Student user functionality** (`@SB-user`): landing/console/Access Lab/stop/continue/role gate/notes
   (covers former `@console` PG-3/5/6/8 + PG-13/14/23/24/30/41/42/45/56)
-- ✅ **Bulk** (`@bulk`): PG-21 — same `sandbox_actions.feature`
+- ✅ **Bulk** (`@bulk`): PG-21 — same `sandbox.feature`
 - 🔲 Value-checks: PG-25, 26, 56, 46 (mostly template-gated on sandbox_1 — need enabling template)
 - 🔲 Traceability refresh (results column is stale)
 - ⏸️ Template variants (VM / Composition / AWS-CSP-GCP) — need cmids (see TODO.md)
 - ⏸️ Config-gated: PG-31, 50, 54, 55 (fault-injection / expired / unlimited templates)
 - ⏸️ CGAP-PG-* gap cases (Playground_Coverage_Matrix.md §E)
 
-## Guided (practice project)  — tags `@guided` + `@guidedgaps` + `@practice_project`
+## Practice Project (merged 2026-09-22) — former `guided_*.feature` → `practice_project*.feature`; tags `@practice_project` + `@guidedgaps` + `@guidedlab` + `@guidedattempts`
 - ✅ Landing + admin + config presence: PGG-4, 5, 6, 9, 10, 12, 2, 3
 - ✅ **Practice Project conversion pass completed 2026-08-29** (`@practice_project`): every one of
   the 191 master rows is classified and every previously blank row has an `@PP-*` scenario.
@@ -245,7 +245,10 @@ open — student can open the problem-statements admin page) · guided cmid 780 
   `mod/cloudlabs:viewlabreadiness`; student blocked); checklist `.checklist-item` completion drives
   `#labProgressBar` to 100% + green `bg-success`; env-type VM/Account toggles `.vm-field`/`.account-field`;
   mandatory Support-Engineer name (empty → `alert()` → save blocked, nothing persists). All green.
-- 🔲 Batch 2: readiness dashboard filters/search (activity/project/support-engineer), successful save +
+- ✅ **Batch 2–3**: `predelivery_dashboard.feature` (filters/cards/table/Open/Apply), `predelivery_mutate.feature`
+  (throwaway sandbox save, audit, visibility, screenshot re-upload, CGAP-PDL-4). Optional `.env`:
+  `LAB_READINESS_DASHBOARD_PATH`. 🔲 Green runs + Partial→Yes where env matches.
+- 🔲 Legacy note: successful save +
   audit-log row, screenshot upload + re-upload override, backend-warning banner, force-enable flagging
 - ✅ Matrix ../Docs/PreDelivery_LabReadiness_Coverage_Matrix.md · CGAP-PDL-1..4 (pending Kiwi write — file was open)
 
@@ -282,6 +285,15 @@ open — student can open the problem-statements admin page) · guided cmid 780 
 - 🔲 Batch 2: dynamic-display behavior, completion tracking, grades (grade.php/gradeslist.php),
   view/index rendering, activity randomization logic
 
+## Phase 0 hygiene (2026-09-22) — **closed**
+- ✅ **`tools/phase0_hygiene.py`**: Lab Templates verified refs → **`reconcile_lab_templates_refs.py`**
+  (31 Kiwi **Yes** rows without a matching `@LT-*` scenario → **Partial** + honest `Automation_Ref`) →
+  Tags ref check → **`sync_kiwi_and_traceability.py`**.
+- ✅ **Moodle_Lab_Templates** dashboard: **35 Yes / 31 Partial / 18 No** (84 total); Regression_Dashboard
+  **35 executed** (53% completion on that row). Do **not** run `update_lab_templates_coverage.py` after
+  reconcile — it would re-mark missing tags as Yes.
+- ⚠️ Pre-existing **Automation_Coverage DRIFT** on Users / Roles / Assessment (QA-owned rows) — unchanged.
+
 ## Lab Templates  — tag `@labtemplates` (cloudlabs labtemplates.php; Kiwi sheet Moodle_Lab_Templates 86)
 - ✅ **Batch 1 green (17 scenarios / 21 exact cases)**: list columns incl. showing the hidden
   Access Keys / Resource Type / Created On columns; Add option/form; required-field and interval
@@ -292,8 +304,7 @@ open — student can open the problem-statements admin page) · guided cmid 780 
   rows carry `data-index` and arrive behind a `.fixed-table-loading` overlay, and columns hidden by the
   chooser are absent from `thead` entirely; Moodle 4.5 runs Bootstrap 5, so the plugin's Bootstrap 4
   `data-toggle` tabs/dropdown need a JS fallback to activate.
-- ⚠️ **LT-16 deviation** (`@labtemplates_deviation`, outside the green suite): the View page renders
-  Edit/Delete actions the manual case requires to be absent — confirmed live, awaiting QA's call.
+- ✅ **LT-16** (`@LT-16`): View details allows **Edit**; **Delete** is not offered on the view page.
 - ⚠️ Interval-specific validation (LT-50/54) is asserted through the field's own required constraint,
   not the plugin's `#createDurationError` text: the form reports required fields one at a time starting
   with Name, so reaching the interval message would mean actually persisting a template.
@@ -337,12 +348,33 @@ open — student can open the problem-statements admin page) · guided cmid 780 
 - 🔲 Batch 3+: per-report-type (imocha 52, Highest-duration 33, Capgemini 47, assessment-attempts 24),
   export. ⏸️ data-verification (counts/grades/dates = need fixtures)
 
-## My Labs  — tag `@mylabs` (theme_nuvetheme `/theme/nuvetheme/mylabs.php`; Kiwi sheet My_Labs 41)
-- ✅ **Batch 1 (no provisioning)**: page renders lab cards (`.course-card`) + search; unauthenticated →
-  login redirect; search sanitizes a `<script>` payload (no execution). Green. Page is require_login +
-  user-scoped (no cross-user leak — unlike the Reports plugin).
-- 🔲 Batch 2: launch/stop a lab from a card, expired-lab display, empty state, responsive, user
-  isolation with real labs, "Show My Labs"/"Activity Type"/"Status Text" theme settings
+## My Labs  — tag `@mylabs` (theme_nuvetheme `/theme/nuvetheme/mylabs.php`; Kiwi sheet My_Labs 44)
+- ✅ **Batch 1–2 (no provisioning, no Reports)**: cards + search, XSS-safe search, partial-name filter,
+  mobile viewport, NuveTheme My Labs controls (@ML-15), nav hide/show (@ML-16/@ML-18), status text
+  off on cards (@ML-19). @ML-17 **Partial** — direct URL redirects to `/my/` when Show My Labs is off.
+  Kiwi: **10 Yes, 1 Partial**, 9 Deferred, 24 No. Dashboard row **My_Labs** 50% completion.
+- 🔲 Batch 3: launch/stop/expired/empty-state/isolation — need `@provisioning` or fixtures.
+
+## Difficulty + Git URL config — tag `@cloudlabsconfig` (`cloudlabs_config.feature`) — **complete (automatable slice)**
+- ✅ **Difficulty_Level_Configuration**: `@DLC-1`…`@DLC-9` — activity dropdown + admin settings (mutating
+  cases restore via `@difficultyrestore`); `@DLC-3` **Deviation** (Practitioner doc vs live levels).
+  Kiwi: **9 Yes**, **2 Deviation**, **4 Deferred**, **2 No**.
+- ✅ **Content_Integration_Git_URL**: `@CIG-1`…`@CIG-11` — description/content source toggles per lab type;
+  `@CIG-7` **Deviation** (playground still shows description source). Remaining git-fetch/PDF/backup rows **No/Deferred**.
+  Kiwi: **5 Yes**, **3 Partial**, **1 Deviation**, **15 No**, **2 Deferred**.
+
+## Sequential Activity Completion — tag `@sac` (`sequential_completion.feature`)
+- ✅ **16/16 Yes** in Kiwi: mark-as-done chain (`@SAC-1`, `@SAC-9`…`@SAC-13`, `@SAC-16`), grade gates
+  (`@SAC-2`…`@SAC-8`, `@SAC-14`), 3-activity chain `@SAC-15`. Needs `MOODLE_WS_TOKEN`; `@AfterAll` deletes fixture courses.
+
+## Moodle-Cloudlabs Integration — tag `@mci` (Kiwi sheet 13 cases, `@MCI-1`…`@MCI-13`)
+- ✅ **Integration smoke (no provisioning)**: Cloud Server Settings fields (URL/company/credentials,
+  developer logs, support email), Lab Templates admin + add-form plan/team/access, lab activity add
+  form (template select + playground/guided/assessment|challenge types), activity chooser / add-module
+  listing, cloudlabs reports on `/report/index.php` or `report_cloudlabsreport`. Kiwi: **11 Yes**,
+  **1 Partial** (@MCI-12 — no Test connection control; scenario `@skip` in default runs),
+  **1 No** (@MCI-13 uninstall — `@skip`). Feature: `moodle_cloudlabs_integration.feature`.
+- Run: `mvnw test -Dcucumber.tags="@mci and not @skip"`
 
 ## Sandbox  — tag `@sandbox` (cloudlabs sandbox/playground landing; Kiwi sheet Sandbox 12)
 - ✅ **Batch 1 (no provisioning)**: sandbox landing (view.php?id=PLAYGROUND_CMID) shows Lab Details
@@ -355,7 +387,7 @@ open — student can open the problem-statements admin page) · guided cmid 780 
 - 🔲 All Course Page (review + 26 scenario conversion authored 2026-08-25; 4 exact rows green;
   live failures found for hidden-course visibility and commented-out admin controls; hardening open;
   see AllCoursePage_Coverage_Matrix.md)
-- 🔲 Settings, cron, Logs, Lab_Templates, LTI & SSO, Cloudlabs Integration, LoadBalancer
+- 🔲 Settings, cron, Logs, LTI & SSO, LoadBalancer
 - 🔲 New Kiwi feature sheets: AWS_Marketplace, Randomization_Activity, Practice_Project, Sandbox,
   Lab_Control_Panel, My_Labs, etc. (many overlap Playground/Guided/Assessment already covered)
 - (Assessment: batches 1-3 done — see its section; Roles + Groups: first batches done — remainder open there)

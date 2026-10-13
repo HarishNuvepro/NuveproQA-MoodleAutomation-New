@@ -6,6 +6,7 @@ import com.microsoft.playwright.Page;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.helpers.UserSpec;
 import com.nuvepro.moodle.helpers.UserTestData;
 import com.nuvepro.moodle.pages.AdminUsers;
@@ -60,11 +61,39 @@ public class MoodleUsersSteps {
         if (id != null && !id.equals("-1")) toDelete.add(Long.parseLong(id));
     }
 
+    /** Under multi-module parallel load, WS/indexing can lag behind a successful add-user redirect. */
+    private Long waitForCreatedUserId(String email, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Long id = ApiClient.findUserIdByEmail(email);
+                if (id != null) return id;
+            } catch (RuntimeException ignored) {
+                // WS may be briefly unavailable under load
+            }
+            try {
+                String uiId = admin.lookupUserIdByEmail(email);
+                if (uiId != null) return Long.parseLong(uiId);
+            } catch (RuntimeException ignored) {
+                // browse filter can race other terminals
+            }
+            ctx.page.waitForTimeout(1_500);
+        }
+        return null;
+    }
+
+    private Browser browserForFreshSession() {
+        if (ctx.browser != null) return ctx.browser;
+        if (GlobalHooks.browser != null) return GlobalHooks.browser;
+        throw new IllegalStateException("Playwright browser not initialized for this scenario");
+    }
+
     private Page loginFresh(String username, String password) {
         if (freshCtx != null) { try { freshCtx.close(); } catch (Throwable ignored) {} }
-        freshCtx = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        freshCtx = BrowserUi.newContext(browserForFreshSession(), new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         Page p = freshCtx.newPage();
+        BrowserUi.preparePage(p);
         p.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
         Auth.uiLogin(p, username, password);
         return p;
@@ -77,6 +106,7 @@ public class MoodleUsersSteps {
     // ---- create / reject (data-driven) ----
     @When("admin submits the add-user form using {string}")
     public void adminSubmitsTheAddUserFormUsing(String dataset) {
+        lastDataset = dataset;
         UserSpec spec = UserTestData.createForm(dataset, user);
         admin.openAddUser();
         if (spec != null) {
@@ -90,13 +120,123 @@ public class MoodleUsersSteps {
 
     @Then("the user is created successfully")
     public void theUserIsCreatedSuccessfully() {
-        assertTrue(admin.leftTheForm(), "still on the add-user form after submit (create failed)");
+        assertTrue(admin.leftTheForm(), "still on the add-user form after submit (create failed): "
+                + admin.addUserFieldErrors());
+        Long id = waitForCreatedUserId(created.email, 90_000);
+        assertTrue(id != null, "add-user form left the page but no account exists for " + created.email);
+        System.out.println("[U-user-1] created " + created.username + " id=" + id);
+        if (!toDelete.contains(id)) toDelete.add(id);
+    }
+
+    /** Field each rejected dataset must flag (the reason it is rejected), or null when not field-specific. */
+    private static String expectedErrorField(String dataset) {
+        if (dataset == null) return null;
+        return switch (dataset) {
+            case "invalid_email", "duplicate_email" -> "email";
+            case "duplicate_username", "uppercase_username", "spaces_username" -> "username";
+            default -> null;
+        };
+    }
+
+    private String lastDataset;
+    private final java.util.Map<String, String> emptyFormErrors = new java.util.TreeMap<>();
+    private String weakPassword;
+    private String weakRule;
+
+    @When("admin submits an empty add-user form")
+    public void adminSubmitsAnEmptyAddUserForm() {
+        admin.openAddUser();
+        admin.untickGeneratePassword();
+        admin.submit();
+        java.util.Map<String, String> browser = admin.addUserFieldErrors();
+        System.out.println("[U-user-2] after Save (browser checks): " + browser);
+        admin.submitAddUserToServer();
+        java.util.Map<String, String> server = admin.addUserFieldErrors();
+        System.out.println("[U-user-2] after server validation: " + server);
+        emptyFormErrors.putAll(browser);
+        emptyFormErrors.putAll(server);
+    }
+
+    @Then("username, password, first name, last name and email each show a required-field error")
+    public void everyRequiredAddUserFieldShowsAnError() {
+        List<String> missing = new ArrayList<>();
+        for (String field : new java.util.TreeSet<>(AdminUsers.REQUIRED_ADD_USER_FIELDS.keySet())) {
+            String error = emptyFormErrors.get(field);
+            System.out.println("[U-user-2] " + field + " -> " + (error == null ? "NO ERROR" : error));
+            if (error == null) missing.add(field);
+        }
+        assertTrue(missing.isEmpty(), "empty add-user form showed no error for " + missing
+                + " (errors seen: " + emptyFormErrors + ")");
+    }
+
+    @When("admin submits the add-user form with password {string} that breaks the {string} rule")
+    public void adminSubmitsWeakPassword(String password, String rule) {
+        weakPassword = password;
+        weakRule = rule;
+        admin.openAddUser();
+        String policy = admin.passwordPolicyText();
+        System.out.println("[U-user-3] site password policy: " + (policy.isEmpty() ? "(none shown)" : policy));
+        if (!policyEnforces(policy, rule, password)) {
+            throw new SkipException("site password policy does not enforce '" + rule + "' for '"
+                    + password + "': " + policy);
+        }
+        created = UserTestData.createForm("weak_password", null).withPassword(password);
+        admin.fillNewUser(created);
+        admin.submit();
+        if (!admin.leftTheForm() && admin.addUserFieldErrors().isEmpty()) {
+            admin.submitAddUserToServer();
+        }
+    }
+
+    @Then("the password error explains the broken rule")
+    public void thePasswordErrorExplainsTheBrokenRule() {
+        String error = admin.addUserFieldErrors().getOrDefault("password", "");
+        System.out.println("[U-user-3] password '" + weakPassword + "' (" + weakRule + ") -> "
+                + (error.isEmpty() ? "NO PASSWORD ERROR" : error));
+        assertTrue(error.toLowerCase(java.util.Locale.ROOT).contains(errorKeyword(weakRule)),
+                "password '" + weakPassword + "' (" + weakRule + ") was not rejected for that rule; "
+                        + "password error: '" + error + "'");
+    }
+
+    private static boolean policyEnforces(String policy, String rule, String password) {
+        String p = policy.toLowerCase(java.util.Locale.ROOT);
+        if ("too short".equals(rule)) {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("at least (\\d+) characters").matcher(p);
+            return m.find() && password.length() < Integer.parseInt(m.group(1));
+        }
+        return p.contains(errorKeyword(rule));
+    }
+
+    /** Wording shared by Moodle's policy summary and its per-rule password error. */
+    private static String errorKeyword(String rule) {
+        return switch (rule) {
+            case "too short" -> "characters";
+            case "no digit" -> "digit";
+            case "no lower case letter" -> "lower case";
+            case "no upper case letter" -> "upper case";
+            case "no special character" -> "special character";
+            default -> throw new IllegalArgumentException("unknown password rule '" + rule + "'");
+        };
     }
 
     @Then("the add-user form is rejected")
     public void theAddUserFormIsRejected() {
         assertFalse(admin.leftTheForm(), "invalid add-user form was accepted (should be rejected)");
-        assertTrue(admin.hasFormError(), "no validation error shown on the add-user form");
+        java.util.Map<String, String> errors = admin.addUserFieldErrors();
+        System.out.println("[add-user] dataset=" + lastDataset + " field errors: " + errors);
+        if (errors.isEmpty() && weakPassword != null) {
+            errors = admin.addUserFieldErrors();
+        }
+        assertTrue(!errors.isEmpty() || admin.hasFormError(),
+                "add-user form stayed put but shows no field error");
+        if (errors.isEmpty()) {
+            return;
+        }
+        String field = expectedErrorField(lastDataset);
+        if (field != null) {
+            assertTrue(errors.containsKey(field), "dataset '" + lastDataset + "' was rejected, but not with a "
+                    + field + " error (errors: " + errors + ")");
+        }
     }
 
     @Given("a registered user")
@@ -104,6 +244,7 @@ public class MoodleUsersSteps {
         requireWs();
         user = ApiClient.createUser(System.currentTimeMillis());
         toDelete.add(user.id);
+        com.nuvepro.moodle.helpers.AutomationManifest.registerUser(user.id, user.username);
     }
 
     @Then("the user can log in with valid credentials")
@@ -209,6 +350,7 @@ public class MoodleUsersSteps {
         if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
         user = ApiClient.createUser(System.currentTimeMillis());
         toDelete.add(user.id);
+        com.nuvepro.moodle.helpers.AutomationManifest.registerUser(user.id, user.username);
         ApiClient.enrolUser(user.id, Long.parseLong(Settings.COURSE_ID), 5);
     }
 
@@ -247,8 +389,8 @@ public class MoodleUsersSteps {
 
     @When("admin deletes the user")
     public void adminDeletesTheUser() {
-        ApiClient.deleteUser(user.id);
-        toDelete.remove(Long.valueOf(user.id));
+        assertTrue(admin.deleteUserViaUi(String.valueOf(user.id)),
+                "admin UI offered no Delete confirmation for user " + user.username);
     }
 
     @Then("the deleted user cannot log in")
@@ -289,7 +431,7 @@ public class MoodleUsersSteps {
         cohortToDelete = name;
         String cohortId = admin.cohortIdByName(name);
         assertTrue(cohortId != null, "could not read the cohort id from /cohort/index.php for " + name);
-        assertTrue(admin.cohortAddMember(cohortId, user.username),
+        assertTrue(admin.cohortAddMember(cohortId, user.username, user.email),
                 "could not add " + user.username + " to cohort " + name + " (id=" + cohortId + ")");
         assertTrue(admin.cohortHasMember(cohortId, user.username),
                 "user is not listed as a cohort member after Add");
@@ -331,11 +473,13 @@ public class MoodleUsersSteps {
         if (user == null) {
             user = ApiClient.createUser(System.currentTimeMillis());
             toDelete.add(user.id);
+        com.nuvepro.moodle.helpers.AutomationManifest.registerUser(user.id, user.username);
         }
         if (freshCtx != null) { try { freshCtx.close(); } catch (Throwable ignored) {} }
-        freshCtx = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        freshCtx = BrowserUi.newContext(browserForFreshSession(), new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         Page p = freshCtx.newPage();
+        BrowserUi.preparePage(p);
         p.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
         String lastMsg = "";
         for (int i = 0; i < 5; i++) {
@@ -394,7 +538,7 @@ public class MoodleUsersSteps {
         roleUserSearch = user.username;
         RoleAssign roleAssign = new RoleAssign(ctx.page);
         roleAssign.openSystemRoleAssign(MANAGER_ROLE_ID);
-        roleAssign.assignUser(roleUserSearch);
+        roleAssign.assignUser(user.username, user.email);
         assertTrue(roleAssign.userAssigned(roleUserSearch),
                 "user was not assigned the Manager system role: " + user.email);
     }
@@ -419,6 +563,7 @@ public class MoodleUsersSteps {
         requireWs();
         user = ApiClient.createUser(System.currentTimeMillis());
         toDelete.add(user.id);
+        com.nuvepro.moodle.helpers.AutomationManifest.registerUser(user.id, user.username);
         pageWait();
         secondUser = ApiClient.createUser(System.currentTimeMillis() + 1);
         toDelete.add(secondUser.id);
@@ -430,17 +575,21 @@ public class MoodleUsersSteps {
 
     @When("admin bulk deletes the two registered users")
     public void adminBulkDeletesTheTwoRegisteredUsers() {
+        bulkSelectBothRegisteredUsers();
+        String problem = admin.applyBulkAction("Delete");
+        assertTrue(problem == null, "bulk Delete was not applied: " + problem);
+    }
+
+    /** Put exactly the two registered users in Bulk user actions' Selected list. */
+    private void bulkSelectBothRegisteredUsers() {
         assertTrue(user != null && secondUser != null, "need two registered users");
-        for (ApiClient.SeededUser u : List.of(user, secondUser)) {
-            boolean bulkOk = admin.bulkActionOnEmailContains(u.email, "delete");
-            if (!bulkOk || admin.userProfilePresent(String.valueOf(u.id))) {
-                admin.deleteUserViaUi(String.valueOf(u.id));
-            }
-            if (admin.userProfilePresent(String.valueOf(u.id))) {
-                ApiClient.deleteUser(u.id);
-            }
-            toDelete.remove(Long.valueOf(u.id));
-        }
+        java.util.Map<Long, String> both = new java.util.LinkedHashMap<>();
+        both.put(user.id, user.email);
+        both.put(secondUser.id, secondUser.email);
+        List<String> selected = admin.bulkSelectExactly(both);
+        assertEquals(new java.util.TreeSet<>(selected),
+                new java.util.TreeSet<>(List.of(String.valueOf(user.id), String.valueOf(secondUser.id))),
+                "Bulk user actions Selected list is not exactly the two registered users");
     }
 
     @Then("the two registered users are deleted")
@@ -454,28 +603,40 @@ public class MoodleUsersSteps {
     @When("admin suspends the two registered users from the user list")
     public void adminSuspendsTheTwoRegisteredUsersFromTheUserList() {
         assertTrue(user != null && secondUser != null, "need two registered users");
-        admin.setSuspended(String.valueOf(user.id), true);
-        admin.setSuspended(String.valueOf(secondUser.id), true);
+        // Browse users (/admin/user.php): legacy Bulk user actions on this site has Delete but no Suspend.
+        for (ApiClient.SeededUser account : List.of(user, secondUser)) {
+            admin.filterUserList(account.username);
+            assertTrue(admin.userAppearsInFilteredList(account.username),
+                    "user is not on Browse users before suspend: " + account.username);
+            admin.setSuspended(String.valueOf(account.id), true);
+        }
     }
 
     @Then("both registered users are shown as suspended in the list")
     public void bothRegisteredUsersAreShownAsSuspendedInTheList() {
-        // Primary: edit-form Suspended checkbox (reliable). List marker is best-effort on report-builder.
-        assertTrue(admin.editFormShowsSuspended(String.valueOf(user.id)),
-                "first user Suspended checkbox is not set on the edit form");
-        assertTrue(admin.editFormShowsSuspended(String.valueOf(secondUser.id)),
-                "second user Suspended checkbox is not set on the edit form");
-        boolean list1 = admin.filteredListRowShowsSuspended(user.username);
-        boolean list2 = admin.filteredListRowShowsSuspended(secondUser.username);
-        if (!(list1 && list2)) {
-            System.out.println("[U-user-31] edit-form suspended OK; list markers list1=" + list1 + " list2=" + list2
-                    + " (report-builder may omit Suspended text — edit-form is authoritative)");
+        for (ApiClient.SeededUser u : List.of(user, secondUser)) {
+            assertTrue(admin.editFormShowsSuspended(String.valueOf(u.id)),
+                    u.username + " Suspended checkbox is not set on the edit form");
+            assertTrue(admin.userAppearsWhenFilteredSuspendedYes(u.username),
+                    u.username + " does not appear when Browse users is filtered Suspended=Yes");
         }
+    }
+
+    @Then("the registered user no longer has the Manager system role")
+    public void theRegisteredUserNoLongerHasTheManagerSystemRole() {
+        RoleAssign roleAssign = new RoleAssign(ctx.page);
+        roleAssign.openSystemRoleAssign(MANAGER_ROLE_ID);
+        assertFalse(roleAssign.userAssigned(user.username),
+                "Manager system role is still assigned to " + user.username + " after removal");
     }
 
     @After
     public void cleanup(io.cucumber.java.Scenario scenario) {
         if (scenario.getSourceTagNames().stream().noneMatch(tag -> tag.startsWith("@U-user-"))) {
+            return;
+        }
+        if (!com.nuvepro.moodle.helpers.CleanupPolicy.runScenarioCleanup()) {
+            System.out.println("[U-user] deferCleanup=true — users left for @cleanup-users");
             return;
         }
         if (lockoutPrevious != null) {

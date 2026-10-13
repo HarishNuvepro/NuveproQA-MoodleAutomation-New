@@ -2,6 +2,7 @@ package com.nuvepro.moodle;
 
 import com.microsoft.playwright.*;
 import com.nuvepro.moodle.config.Settings;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import org.testng.annotations.*;
 
 /**
@@ -17,16 +18,16 @@ public abstract class BaseTest {
     @BeforeClass(alwaysRun = true)
     public void launchBrowser() {
         playwright = Playwright.create();
-        browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
-                .setHeadless(Settings.HEADLESS).setSlowMo(Settings.SLOWMO_MS));
+        browser = playwright.chromium().launch(BrowserUi.defaultLaunchOptions());
     }
 
     @BeforeMethod(alwaysRun = true)
     public void newPage() {
-        context = browser.newContext(new Browser.NewContextOptions()
+        context = BrowserUi.newContext(browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL)
                 .setIgnoreHTTPSErrors(true));
         page = context.newPage();
+        BrowserUi.preparePage(page);
         page.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
     }
 

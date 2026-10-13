@@ -4,7 +4,7 @@
 
 Feature: Assessment — Show / hide grades of users
 
-  @A55
+  @A55 @mediumbatch1
   Scenario: The assessment activity offers the Attempts Summary Columns hide configuration
     Given the assessment activity edit form is open
     Then the Attempts Summary Columns hide configuration is available

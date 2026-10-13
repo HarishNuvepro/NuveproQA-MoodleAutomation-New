@@ -8,6 +8,8 @@ import com.microsoft.playwright.options.SelectOption;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.FormSubmit;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import io.cucumber.java.After;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
@@ -76,7 +78,7 @@ public class BulkMailSteps {
         student = ApiClient.createUser(System.currentTimeMillis());
         if (!Settings.COURSE_ID.isEmpty())
             ApiClient.enrolUser(student.id, Long.parseLong(Settings.COURSE_ID), 5);
-        studentCtx = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        studentCtx = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         Page sp = studentCtx.newPage();
         sp.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
@@ -104,8 +106,8 @@ public class BulkMailSteps {
     }
 
     private void save() {
-        ctx.page.locator("#id_submitbutton").first().click();
-        ctx.page.waitForTimeout(2_500);
+        FormSubmit.andAwaitNewPage(ctx.page, ctx.page.locator("#id_submitbutton").first());
+        ctx.page.waitForTimeout(1_000);
     }
 
     @Then("admin can save a password pattern and behavior and it persists")

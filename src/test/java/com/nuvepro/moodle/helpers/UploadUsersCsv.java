@@ -22,7 +22,7 @@ public final class UploadUsersCsv {
             for (List<String> row : rows) {
                 lines.add(row.stream().map(UploadUsersCsv::escape).collect(Collectors.joining(",")));
             }
-            Path file = dir.resolve(name + ".csv");
+            Path file = dir.resolve(uniqueName(name) + ".csv");
             Files.write(file, lines, StandardCharsets.UTF_8);
             return file;
         } catch (IOException e) {
@@ -34,7 +34,7 @@ public final class UploadUsersCsv {
         Path dir = Path.of("target", "upload-users");
         try {
             Files.createDirectories(dir);
-            Path file = dir.resolve(name + ".csv");
+            Path file = dir.resolve(uniqueName(name) + ".csv");
             Files.writeString(file, "", StandardCharsets.UTF_8);
             return file;
         } catch (IOException e) {
@@ -44,6 +44,10 @@ public final class UploadUsersCsv {
 
     public static List<String> row(String... values) {
         return Arrays.asList(values);
+    }
+
+    private static String uniqueName(String name) {
+        return name + "_t" + Thread.currentThread().getId() + "_n" + System.nanoTime();
     }
 
     private static String escape(String value) {

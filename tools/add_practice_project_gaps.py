@@ -43,7 +43,7 @@ CONVERTED_NO = {
     192: "No — outside date window needs a dedicated dated activity (must not mutate GUIDED_CMID)",
 }
 CONVERTED_NO.update({
-    row: "guided_lab.feature @PP-%s — converted; CloudLabs admin login currently returns HTTP 401" % row
+    row: "practice_project_user_functionality.feature @PP-%s — converted; CloudLabs admin login currently returns HTTP 401" % row
     for row in (11, 12, 20, 21, 27, 29, 33, 37, 42, 48, 139)
 })
 CONVERTED_NO.update({
@@ -55,7 +55,7 @@ CONVERTED_NO.update({
     for row in range(59, 69)
 })
 CONVERTED_NO.update({
-    row: "practice_project_reports.feature @PP-%s — converted; site configurable-report URL/artifact is unavailable" % row
+    row: "No — Not automatable: Moodle site configurable reports (detailed/summary); deferred per QA"
     for row in (
         69, 70, 71, 72, *range(73, 93), *range(94, 113), 137, 138, 142
     )
@@ -115,16 +115,16 @@ VERIFIED = {
     141: "practice_project.feature @PP-141",
     187: "practice_project.feature @CGAP-PP-1",
     188: "practice_project.feature @CGAP-PP-2",
-    181: "guided_gaps.feature @CGAP-PGG-13",
-    182: "guided_gaps.feature @CGAP-PGG-14",
-    183: "guided_gaps.feature @CGAP-PGG-15",
-    184: "guided_gaps.feature @CGAP-PGG-17",
+    181: "practice_project_user_functionality.feature @CGAP-PGG-13",
+    182: "practice_project_user_functionality.feature @CGAP-PGG-14",
+    183: "practice_project.feature @CGAP-PGG-15",
+    184: "Covered by @PP-2 (CGAP-PGG-17 git URL toggle)",
     186: "practice_project.feature @CGAP-PGG-20",
     189: "practice_project.feature @CGAP-PP-3",
-    152: "guided_lab.feature @guidedlab | control panel shown after start",
-    175: "guided_lab.feature @CGAP-PGG-1 @guidedlab | Continue reopens the control panel",
-    176: "guided_attempts.feature @CGAP-PGG-2 @guidedattempts | New Attempt after cooldown",
-    180: "guided_lab.feature @CGAP-PGG-8 @guidedlab | start attempt reaches Running",
+    152: "practice_project_user_functionality.feature @guidedlab | control panel shown after start",
+    175: "practice_project_user_functionality.feature @CGAP-PGG-1 @guidedlab | Continue reopens the control panel",
+    176: "practice_project_user_functionality.feature @CGAP-PGG-2 @guidedattempts | New Attempt after cooldown",
+    180: "practice_project_user_functionality.feature @CGAP-PGG-8 @guidedlab | start attempt reaches Running",
 }
 
 PARTIAL = {}

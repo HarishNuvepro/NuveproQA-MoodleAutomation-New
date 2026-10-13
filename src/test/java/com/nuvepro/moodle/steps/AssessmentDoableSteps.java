@@ -2,6 +2,7 @@ package com.nuvepro.moodle.steps;
 
 import com.microsoft.playwright.Locator;
 import com.nuvepro.moodle.config.Settings;
+import com.nuvepro.moodle.helpers.FormSubmit;
 import com.nuvepro.moodle.pages.AssessmentAdmin;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
@@ -61,8 +62,8 @@ public class AssessmentDoableSteps {
 
     @Given("a new challenge activity form is open")
     public void newChallengeFormOpen() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
-        admin.openNewChallengeForm(Settings.COURSE_ID);
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
+        admin.openNewChallengeForm(ctx.assessmentCourseId());
     }
 
     @Then("the assessment instructions editor is present")
@@ -86,8 +87,8 @@ public class AssessmentDoableSteps {
         if (rand.count() == 0) throw new SkipException("assessment_randomization field not on the form");
         rand.selectOption(new com.microsoft.playwright.options.SelectOption().setLabel("Yes"));
         ctx.page.waitForTimeout(400);
-        ctx.page.locator("#id_submitbutton").click();
-        ctx.page.waitForTimeout(2_000);
+        FormSubmit.andAwaitNewPage(ctx.page, ctx.page.locator("#id_submitbutton"), 30_000);
+        ctx.page.waitForTimeout(1_000);
     }
 
     @Then("a required-field validation error is shown")

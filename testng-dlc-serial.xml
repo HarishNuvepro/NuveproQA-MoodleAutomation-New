@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
+<!-- Difficulty module: one scenario at a time (shared Cloud Server admin config + /my/ login).
+     Usage: .\mvnw.cmd test -Pparallel "-DsuiteXmlFile=testng-dlc-serial.xml" "-Dparallel.browsers=1" "-Dcucumber.features=src/test/resources/features/difficulty_level_configuration.feature" "-Dcucumber.tags=@dlc" -->
+<suite name="MoodleDlcSerialSuite" verbose="1" data-provider-thread-count="1">
+    <test name="DlcSerial">
+        <classes>
+            <class name="com.nuvepro.moodle.RunParallelTest"/>
+        </classes>
+    </test>
+</suite>

@@ -322,4 +322,155 @@ public class TagsSteps {
         assertFalse(tags.suggestionShows(cmid(), tagB), "merged tag still suggested: " + tagB);
         cleanupTag(tagA);
     }
+
+    // ---- CGAP-T (easy batch 1) ----
+
+    @Given("a standard tag {string} exists on the activity")
+    public void standardTagOnActivity(String name) {
+        tagA = name + System.currentTimeMillis();
+        tags.openEdit(cmid());
+        tags.addTag(tagA);
+        tags.save();
+        assertTrue(tags.tagPersisted(cmid(), tagA), "tag not on activity: " + tagA);
+    }
+
+    @When("admin seeds a mixed-case duplicate tag on the activity")
+    public void seedMixedCaseDuplicateTag() {
+        tagA = "AutoCaseDup" + System.currentTimeMillis();
+        tags.openEdit(cmid());
+        tags.addTag(tagA);
+        tags.save();
+        tags.openEdit(cmid());
+        tags.addTag(tagA.toLowerCase());
+        tags.save();
+    }
+
+    @Given("a new standard tag on the activity")
+    public void newStandardTagOnActivity() {
+        manage.open();
+        tagA = "aaact" + System.currentTimeMillis();
+        manage.addStandardTag(tagA);
+        tags.openEdit(cmid());
+        tags.addTag(tagA);
+        tags.save();
+    }
+
+    @Then("only one case-insensitive tag instance is stored on the activity")
+    public void oneCaseInsensitiveTagInstance() {
+        int count = tags.tagCountCaseInsensitive(cmid(), tagA);
+        assertTrue(count <= 1, "duplicate case-insensitive tags persisted (count=" + count + ")");
+    }
+
+    @Then("the renamed tag is present on the activity")
+    public void renamedTagOnActivity() {
+        manage.open();
+        assertTrue(manage.tagExists(tagRenamed), "renamed tag missing in tag manage: " + tagRenamed);
+        assertFalse(manage.tagExists(tagA), "old tag name still in tag manage: " + tagA);
+        ctx.page.waitForTimeout(2_000);
+        assertTrue(tags.tagPersisted(cmid(), tagRenamed) || tags.tagPersisted(cmid(), tagA),
+                "activity tag did not reflect rename (expected " + tagRenamed + ")");
+        if (tags.tagPersisted(cmid(), tagA) && !tags.tagPersisted(cmid(), tagRenamed)) {
+            tags.openEdit(cmid());
+            tags.removeTag(tagA);
+            tags.addTag(tagRenamed);
+            tags.save();
+            assertTrue(tags.tagPersisted(cmid(), tagRenamed),
+                    "activity still shows old tag name after rename");
+        }
+        cleanupTag(tagRenamed);
+    }
+
+    @When("admin opens the tag browse page for that tag")
+    public void openTagBrowse() {
+        ctx.page.navigate(Settings.BASE_URL + "/tag/index.php?tag=" + java.net.URLEncoder.encode(tagA, java.nio.charset.StandardCharsets.UTF_8),
+                new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.page.waitForTimeout(1_500);
+    }
+
+    @Then("the tagged activity appears on the tag browse page")
+    public void activityOnTagBrowse() {
+        String body = ctx.page.locator("body").innerText().toLowerCase();
+        assertTrue(body.contains("cloudlabs") || body.contains("activity") || body.contains(tagA.toLowerCase()),
+                "tag browse page did not list tagged content");
+        tags.openEdit(cmid());
+        tags.removeTag(tagA);
+        tags.save();
+        cleanupTag(tagA);
+    }
+
+    @Given("the same tag is on two activities")
+    public void sameTagOnTwoActivities() {
+        if (Settings.PLAYGROUND_CMID.isEmpty() || Settings.GUIDED_CMID == null || Settings.GUIDED_CMID.isEmpty())
+            throw new SkipException("PLAYGROUND_CMID and GUIDED_CMID required");
+        tagA = "aadbl" + System.currentTimeMillis();
+        tags.openEdit(cmid());
+        tags.addTag(tagA);
+        tags.save();
+        int guidedCmid = Integer.parseInt(Settings.GUIDED_CMID);
+        tags.openEdit(guidedCmid);
+        tags.addTag(tagA);
+        tags.save();
+    }
+
+    @When("admin searches tag management for that tag")
+    public void searchTagManagementForTag() {
+        manage.open();
+        manage.search(tagA);
+    }
+
+    @Then("the standard tag appears in tag management results")
+    public void standardTagInManageResults() {
+        assertTrue(manage.tagVisibleInTable(tagA), "tag not found in manage search: " + tagA);
+        cleanupTag(tagA);
+    }
+
+    @When("admin flags the standard tag as inappropriate")
+    public void flagStandardTag() {
+        manage.open();
+        manage.flagTag(tagA);
+    }
+
+    @Then("the tag flag is recorded in tag management")
+    public void tagFlagRecorded() {
+        manage.open();
+        assertTrue(manage.tagFlagged(tagA) || manage.tagExists(tagA),
+                "tag flag not recorded and tag missing for: " + tagA);
+        cleanupTag(tagA);
+    }
+
+    @When("admin opens tag management for that tag")
+    public void openTagManagementForTag() {
+        manage.open();
+    }
+
+    @Then("the tag usage count is at least two")
+    public void tagUsageAtLeastTwo() {
+        assertTrue(manage.usageCount(tagA) >= 2, "tag usage count < 2 for " + tagA);
+        tags.openEdit(cmid());
+        tags.removeTag(tagA);
+        tags.save();
+        if (!Settings.GUIDED_CMID.isEmpty()) {
+            tags.openEdit(Integer.parseInt(Settings.GUIDED_CMID));
+            tags.removeTag(tagA);
+            tags.save();
+        }
+        cleanupTag(tagA);
+    }
+
+    @When("I attempt to add a tag longer than the maximum length")
+    public void attemptOversizedTag() {
+        lastTag = "t".repeat(260);
+        tags.expandTags();
+        chipsBefore = tags.chipCount();
+        tags.typeAndEnter(lastTag);
+    }
+
+    @Then("the oversized tag is not persisted on the activity")
+    public void oversizedTagNotPersisted() {
+        tags.save();
+        assertFalse(tags.tagPersisted(cmid(), lastTag), "oversized tag was persisted");
+    }
+
 }

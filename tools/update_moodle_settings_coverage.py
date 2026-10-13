@@ -17,13 +17,11 @@ COVERAGE = "Automation_Coverage"
 PLAN = "Release_Regression_Plan"
 STATES = ("yes", "partial", "deviation", "deferred", "no")
 
-# Manual expected 0-day duration to be rejected; this site stores 0.
-DEVIATION_ROWS = {
-    24: "Deviation — site accepts duration 0 (manual expected 365). moodle_settings.feature @SET-22",
-}
+DEVIATION_ROWS = {}
 
 NOTES = {
     7: "moodle_settings.feature @SET-5 (live default is Custom sections; sheet said Topics)",
+    24: "moodle_settings.feature @SET-22 (automation verifies site stores 0; manual text still says 365)",
     47: "moodle_settings.feature @SET-45 (footer offers No footer; site default is MoodleNet)",
 }
 
@@ -97,6 +95,9 @@ def main() -> None:
         sheet.cell(row, 11).value = "Yes"
         sheet.cell(row, 12).value = NOTES.get(row, f"moodle_settings.feature @SET-{set_id}")
         sheet.cell(row, 7).value = "Pass"
+        if row == 24:
+            sheet.cell(row, 9).value = (
+                "Site accepts and stores 0 (automated @SET-22); manual note re 365 is outdated")
 
     last = 81
     if str(sheet.cell(last, 1).value or "").strip() != "CGAP-SET-1":

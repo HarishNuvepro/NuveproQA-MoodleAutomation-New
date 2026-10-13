@@ -9,6 +9,7 @@ import com.nuvepro.moodle.helpers.AssessmentActivityRegistry;
 import com.nuvepro.moodle.helpers.AssessmentCreateSpec;
 import com.nuvepro.moodle.helpers.AssessmentTestData;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ChallengeActivityForm;
 import com.nuvepro.moodle.pages.CourseView;
 import io.cucumber.java.en.Given;
@@ -40,7 +41,7 @@ public class AssessmentCreateSteps {
 
     @When("admin creates an assessment activity using {string}")
     public void adminCreatesAnAssessmentActivityUsing(String dataset) {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
         ctx.newActivityDataset = dataset;
         if ((ctx.hasAnyTagStartingWith("@A-user-") || ctx.hasAnyTagStartingWith("@LT-"))
                 && !ctx.hasTag("@fresh_activity_reuse_user") && !ctx.hasTag("@fresh_activity")
@@ -49,7 +50,7 @@ public class AssessmentCreateSteps {
         }
         last = AssessmentTestData.create(dataset);
         ctx.lastCreateSpec = last;
-        form.openAddFormFromCourse(Settings.COURSE_ID);
+        form.openAddFormFromCourse(ctx.assessmentCourseId());
         form.fill(last);
         form.saveAndDisplay();
         createdCmid = form.activityCmidFromUrl();
@@ -72,7 +73,7 @@ public class AssessmentCreateSteps {
         ctx.newActivityName = entry.name();
         ctx.sectionId = entry.sectionId();
         // A-user-9 may hide eval_auto; later scenarios still need a visible, launchable activity.
-        new CourseView(ctx.page).showActivityOnCoursePage(Settings.COURSE_ID,
+        new CourseView(ctx.page).showActivityOnCoursePage(ctx.assessmentCourseId(),
                 Integer.parseInt(entry.cmid()), entry.name());
         ctx.page.navigate(Settings.BASE_URL + "/mod/cloudlabs/view.php?id=" + entry.cmid(),
                 new Page.NavigateOptions()
@@ -98,7 +99,7 @@ public class AssessmentCreateSteps {
 
     private void ensureShownAndRegister(String dataset) {
         if (ctx.newActivityCmid == null || ctx.newActivityCmid.isBlank()) return;
-        new CourseView(ctx.page).showActivityOnCoursePage(Settings.COURSE_ID,
+        new CourseView(ctx.page).showActivityOnCoursePage(ctx.assessmentCourseId(),
                 Integer.parseInt(ctx.newActivityCmid), ctx.newActivityName);
         ctx.page.navigate(Settings.BASE_URL + "/mod/cloudlabs/view.php?id=" + ctx.newActivityCmid,
                 new Page.NavigateOptions()
@@ -110,11 +111,11 @@ public class AssessmentCreateSteps {
 
     @Given("admin shows the created assessment on the course page")
     public void adminShowsTheCreatedAssessmentOnTheCoursePage() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
         if (ctx.newActivityCmid == null || ctx.newActivityCmid.isBlank()) {
             throw new SkipException("no created assessment cmid — run the create step first");
         }
-        new CourseView(ctx.page).showActivityOnCoursePage(Settings.COURSE_ID,
+        new CourseView(ctx.page).showActivityOnCoursePage(ctx.assessmentCourseId(),
                 Integer.parseInt(ctx.newActivityCmid), ctx.newActivityName);
     }
 
@@ -132,9 +133,9 @@ public class AssessmentCreateSteps {
 
     @When("admin tries to create an assessment activity using {string}")
     public void adminTriesToCreateAnAssessmentActivityUsing(String dataset) {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
         last = AssessmentTestData.create(dataset);
-        form.openAddFormFromCourse(Settings.COURSE_ID);
+        form.openAddFormFromCourse(ctx.assessmentCourseId());
         form.fill(last);
         form.saveAndDisplay();
     }
@@ -149,17 +150,17 @@ public class AssessmentCreateSteps {
 
     @When("an enrolled student opens the course")
     public void anEnrolledStudentOpensTheCourse() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
         if (Settings.WS_TOKEN.isEmpty()) throw new SkipException("MOODLE_WS_TOKEN not set");
         student = ApiClient.createUser(System.currentTimeMillis());
-        ApiClient.enrolUser(student.id, Long.parseLong(Settings.COURSE_ID), 5);
-        ctx.studentContext = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        ApiClient.enrolUser(student.id, Long.parseLong(ctx.assessmentCourseId()), 5);
+        ctx.studentContext = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL)
                 .setIgnoreHTTPSErrors(true));
         ctx.studentPage = ctx.studentContext.newPage();
         ctx.studentPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
         Auth.uiLogin(ctx.studentPage, student.username, student.password);
-        ctx.studentPage.navigate(Settings.BASE_URL + "/course/view.php?id=" + Settings.COURSE_ID,
+        ctx.studentPage.navigate(Settings.BASE_URL + "/course/view.php?id=" + ctx.assessmentCourseId(),
                 new Page.NavigateOptions()
                         .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
                         .setTimeout(45_000));
@@ -176,7 +177,7 @@ public class AssessmentCreateSteps {
                 + "button:has-text('Add an activity')").count();
         assertTrue(chooser == 0, "student sees Add an activity on the course page");
         p.navigate(Settings.BASE_URL + "/course/modedit.php?add=cloudlabs&type=&course="
-                        + Settings.COURSE_ID + "&section=0&return=0&sr=0",
+                        + ctx.assessmentCourseId() + "&section=0&return=0&sr=0",
                 new Page.NavigateOptions()
                         .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
                         .setTimeout(45_000));

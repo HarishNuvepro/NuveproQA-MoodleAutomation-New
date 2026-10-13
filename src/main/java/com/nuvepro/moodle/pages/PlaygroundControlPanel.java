@@ -4,6 +4,8 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.assertions.LocatorAssertions;
 import com.microsoft.playwright.assertions.PlaywrightAssertions;
+import java.util.Locale;
+import java.util.regex.Pattern;
 
 /**
  * Playground lab CONTROL PANEL (console). Selectors read directly from the plugin source:
@@ -99,6 +101,206 @@ public class PlaygroundControlPanel extends BasePage {
         } catch (RuntimeException e) {
             return false;
         }
+    }
+
+    /** Lab console nodes only — never page-wide alerts (Moodle messaging uses [role=alert]). */
+    public static final String CONSOLE_TEXT_ROOT =
+            MASTER + ", #np-ap-mod-lab-container-lablinks, #np-ap-mod-lab-container-home, "
+                    + PROGRESS_LOADER + ", " + H_LAB_STATUS + ", #lab-status-pl, "
+                    + ".np-ap-pl-template-master-container .alert";
+
+    private static final String SCOPED_CONSOLE_ROOT =
+            "#region-main " + MASTER + ", #region-main #np-ap-mod-lab-container-lablinks, "
+                    + "#region-main #np-ap-mod-lab-container-home, #region-main #np-ap-mod-lab-loader, "
+                    + "#region-main " + H_LAB_STATUS + ", #region-main #lab-status-pl";
+
+    private static final Pattern LAB_DELETED_COPY = Pattern.compile("lab\\s+is\\s+deleted");
+
+    /** AJAX cp fragment injected on view.php (status line and/or master chrome). */
+    public boolean isLabCpFragmentMounted() {
+        try {
+            Object mounted = page.evaluate("""
+                    () => {
+                      const region = document.querySelector('#region-main') || document.body;
+                      const has = (sel) => region.querySelector(sel) != null;
+                      return has('#np-ap-mod-loadTimeStatus')
+                          || has('.np-ap-pl-template-master-container')
+                          || has('#np-ap-mod-lab-container-home')
+                          || has('#np-ap-mod-lab-loader')
+                          || has('#np-ap-mod-lab-topbar')
+                          || has('#np-ap-mod-lab-container-iframe');
+                    }
+                    """);
+            return Boolean.TRUE.equals(mounted);
+        } catch (RuntimeException e) {
+            return page.locator("#region-main " + H_LAB_STATUS + ", #region-main " + MASTER).count() > 0;
+        }
+    }
+
+    public boolean isConsoleOpen() {
+        if (isShown()) return true;
+        if (!isLabCpFragmentMounted()) return false;
+        Locator root = page.locator(SCOPED_CONSOLE_ROOT);
+        if (root.count() == 0) {
+            root = page.locator(CONSOLE_TEXT_ROOT);
+        }
+        for (int i = 0; i < root.count(); i++) {
+            try {
+                if (root.nth(i).isVisible()) return true;
+            } catch (RuntimeException ignored) {}
+        }
+        String status = loadTimeStatusText();
+        return !status.isBlank() && !"-".equals(status.trim());
+    }
+
+    /** Provider status line on the lab console (#np-ap-mod-loadTimeStatus). */
+    public String loadTimeStatusText() {
+        try {
+            Object raw = page.evaluate("""
+                    () => {
+                      const el = document.querySelector('#np-ap-mod-loadTimeStatus');
+                      if (!el) return '';
+                      let t = (el.innerText || el.textContent || el.value || '').trim();
+                      if ((!t || t === '-') && el.getAttribute('value')) {
+                        t = el.getAttribute('value').trim();
+                      }
+                      return t;
+                    }
+                    """);
+            if (raw != null) {
+                String v = String.valueOf(raw).trim();
+                if (!v.isBlank() && !"null".equals(v)) return v;
+            }
+        } catch (RuntimeException ignored) {}
+        Locator el = page.locator(H_LAB_STATUS);
+        if (el.count() == 0) return "";
+        try {
+            String t = el.first().innerText().trim();
+            if (t.isBlank() || "-".equals(t)) {
+                try {
+                    t = el.first().inputValue().trim();
+                } catch (RuntimeException ignored) {}
+            }
+            return t == null ? "" : t;
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    public boolean waitForLabCpFragment(int maxSeconds) {
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            if (isLabCpFragmentMounted()) return true;
+            page.waitForTimeout(400);
+        }
+        return isLabCpFragmentMounted();
+    }
+
+    private boolean isDeletedStatusCopy(String text) {
+        if (text == null || text.isBlank() || "-".equals(text.trim())) return false;
+        String lower = text.toLowerCase(Locale.ROOT).trim();
+        if ("deleted".equals(lower)) return true;
+        if (LAB_DELETED_COPY.matcher(lower).find()) return true;
+        if (lower.contains("lab has been deleted") || lower.contains("this lab is deleted")) return true;
+        return lower.contains("deleted") && lower.contains("lab");
+    }
+
+    /** Visible text inside the lab console region only (not the course/landing chrome). */
+    public String consoleVisibleText() {
+        String full = consoleFullText();
+        return full.isBlank() ? "" : full;
+    }
+
+    /**
+     * All text/values under the lab console (includes {@code #np-ap-mod-loadTimeStatus} which often
+     * shows {@code -} until cp.php finishes loading, then "Lab is deleted").
+     */
+    public String consoleFullText() {
+        try {
+            Object raw = page.evaluate("""
+                    () => {
+                      const parts = [];
+                      const add = (el) => {
+                        if (!el) return;
+                        let t = (el.innerText || el.textContent || el.value || '').trim();
+                        if (!t || t === '-') {
+                          const html = (el.innerHTML || '').replace(/<[^>]+>/g, ' ').trim();
+                          if (html && html !== '-') t = html;
+                        }
+                        if (t && t !== '-') parts.push(t);
+                      };
+                      const region = document.querySelector('#region-main') || document.body;
+                      const sels = [
+                        '.np-ap-pl-template-master-container',
+                        '#np-ap-mod-lab-container-home',
+                        '#np-ap-mod-lab-container-lablinks',
+                        '#np-ap-mod-loadTimeStatus',
+                        '#lab-status-pl',
+                        '#np-ap-mod-lab-loader',
+                        '#np-ap-mod-lab-ui-schema',
+                        '.np-ap-pl-template-master-container .alert-danger',
+                        '.np-ap-pl-template-master-container .alert-warning'
+                      ];
+                      for (const sel of sels) {
+                        region.querySelectorAll(sel).forEach(add);
+                      }
+                      return parts.join(' ');
+                    }
+                    """);
+            if (raw != null) {
+                String v = String.valueOf(raw).trim();
+                if (!v.isBlank() && !"null".equals(v)) return v.replaceAll("\\s+", " ").trim();
+            }
+        } catch (RuntimeException ignored) {}
+        StringBuilder sb = new StringBuilder();
+        Locator root = page.locator(CONSOLE_TEXT_ROOT);
+        for (int i = 0; i < root.count(); i++) {
+            try {
+                Locator el = root.nth(i);
+                String t = el.innerText();
+                if (t == null || t.isBlank()) {
+                    try {
+                        t = el.inputValue();
+                    } catch (RuntimeException ignored) {}
+                }
+                if (t != null && !t.isBlank()) sb.append(t).append(' ');
+            } catch (RuntimeException ignored) {}
+        }
+        return sb.toString().replaceAll("\\s+", " ").trim();
+    }
+
+    /** Provider copy on the console after admin Delete — e.g. "Lab is deleted". */
+    public boolean showsLabDeletedMessage() {
+        if (isDeletedStatusCopy(loadTimeStatusText())) return true;
+        return isDeletedStatusCopy(consoleFullText());
+    }
+
+    public boolean waitForLabDeletedMessageOnConsole(int maxSeconds) {
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        int polls = 0;
+        while (System.currentTimeMillis() < deadline) {
+            polls++;
+            if (isLabCpFragmentMounted() && showsLabDeletedMessage()) return true;
+            String status = loadTimeStatusText();
+            if (isLabCpFragmentMounted()
+                    && (status.isBlank() || "-".equals(status.trim()) || !showsLabDeletedMessage())
+                    && polls % 5 == 0) {
+                clickConsoleRefreshIfPresent();
+            }
+            page.waitForTimeout(800);
+        }
+        return isLabCpFragmentMounted() && showsLabDeletedMessage();
+    }
+
+    private void clickConsoleRefreshIfPresent() {
+        Locator refresh = page.locator(REFRESH_LAB);
+        if (refresh.count() == 0) return;
+        try {
+            if (refresh.first().isVisible()) {
+                refresh.first().click();
+                page.waitForTimeout(1_500);
+            }
+        } catch (RuntimeException ignored) {}
     }
 
     /**
@@ -241,13 +443,16 @@ public class PlaygroundControlPanel extends BasePage {
                       const acc = document.querySelectorAll(
                           '#np-ap-mod-lab-acc-launch-buttons a, #np-ap-mod-lab-acc-launch-buttons button');
                       if (acc.length > 0) return 'Access Lab buttons';
+                      const frameRoot = document.querySelector('#np-ap-mod-lab-container-iframe');
+                      if (frameRoot && !frameRoot.classList.contains('d-none')) return 'VM iframe container';
                       const iframe = document.querySelector(
                           '#np-ap-mod-lab-container-iframe iframe, #np-ap-mod-lab-container iframe, '
-                          + 'iframe[src*="guacamole"], iframe[id*="lab_iframe"]');
+                          + 'iframe[src*="guacamole"], iframe[id*="lab_iframe"], iframe[id*="lab"]');
                       if (iframe) {
                         const src = iframe.getAttribute('src') || iframe.src || '';
                         const hidden = iframe.closest('.d-none');
-                        if (src && src !== 'about:blank' && !hidden) return 'lab iframe present';
+                        if (!hidden && (src && src !== 'about:blank' || iframe.offsetWidth > 0))
+                          return 'lab iframe present';
                       }
                       if (shown('#np-ap-mod-lab-topbar')) return 'lab toolbar';
                       const start = document.querySelector(
@@ -285,8 +490,14 @@ public class PlaygroundControlPanel extends BasePage {
             } catch (RuntimeException ignored) {}
             page.waitForTimeout(1_000);
         }
-        return page.locator("#np-ap-mod-btn-tb-fullscreen, #np-ap-mod-btn-tb-newtab, "
-                + "#np-ap-mod-btn-tb-speedTest").count() > 0;
+        Locator tb = page.locator("#np-ap-mod-btn-tb-fullscreen, #np-ap-mod-btn-tb-newtab, "
+                + "#np-ap-mod-btn-tb-speedTest");
+        for (int i = 0; i < tb.count(); i++) {
+            try {
+                if (tb.nth(i).isVisible()) return true;
+            } catch (RuntimeException ignored) {}
+        }
+        return false;
     }
 
     /** DOM click — works when the control is in a {@code d-none} ancestor (Playwright visibility fails). */
@@ -389,6 +600,29 @@ public class PlaygroundControlPanel extends BasePage {
         String text = panel.count() > 0 ? panel.first().innerText().trim() : "";
         closeIfPresent("#closeAuth");
         return text;
+    }
+
+    /** Password field in the credentials popup (while open). */
+    public String credentialsPasswordValue() {
+        Locator preferred = page.locator(
+                "#np-ap-mod-input-loginpassword, #authPopup input[id*='assword' i], "
+                        + "#np-ap-pl-tab-access-content input[id*='assword' i], "
+                        + "input[id^='np-ap-mod-input-'][id*='assword' i]");
+        for (int i = 0; i < preferred.count(); i++) {
+            try {
+                String v = preferred.nth(i).inputValue();
+                if (v != null && !v.isBlank()) return v.trim();
+            } catch (RuntimeException ignored) {}
+        }
+        return "";
+    }
+
+    public boolean openCredentialsFab() {
+        Locator fab = page.locator("#openAuthBtn");
+        if (fab.count() == 0 || !fab.first().isVisible()) return false;
+        fab.first().click();
+        page.waitForTimeout(1_200);
+        return true;
     }
 
     /** Open Lab Info and return panel text. */

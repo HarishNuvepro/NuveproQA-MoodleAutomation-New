@@ -16,7 +16,7 @@ Feature: Assessment — Hide final grade & result
   Scenario: A teacher can see the grade and result columns
     Then a teacher can see the grade and result columns on manage challenges
 
-  @A135
+  @A135 @mediumbatch1
   Scenario: The Final Result column control is available
     Given the assessment activity settings form is open as admin
     Then the "FinalResult" attempt-summary column control is available

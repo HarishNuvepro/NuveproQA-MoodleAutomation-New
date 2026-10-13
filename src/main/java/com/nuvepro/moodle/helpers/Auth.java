@@ -9,25 +9,60 @@ public final class Auth {
     private Auth() {}
 
     public static void uiLogin(Page page, String username, String password) {
-        // Retry once and use DOMCONTENTLOADED + a settle wait (the dashboard polls, so
-        // networkidle never fires; login can also flake transiently under a slow instance).
-        for (int attempt = 1; attempt <= 2; attempt++) {
-            attemptLoginOnce(page, username, password);
+        // DOMCONTENTLOADED + settle wait (dashboard polls — networkidle never fires). Retry navigation
+        // and submit when the instance is slow after long admin fixture setup (e.g. @sac lab creates).
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            try {
+                attemptLoginOnce(page, username, password);
+            } catch (RuntimeException e) {
+                if (!transientNavigationError(e) || attempt == 4) {
+                    throw e;
+                }
+                page.waitForTimeout(2_000L * attempt);
+                continue;
+            }
             if (isLoggedIn(page)) return;
+            page.waitForTimeout(1_500);
         }
-        // Left on the login page after retries; the calling test will assert/skip accordingly.
     }
 
     /** Single login attempt (no retry) — used for lockout / negative login cases. */
     public static void attemptLoginOnce(Page page, String username, String password) {
-        page.navigate(Settings.BASE_URL + "/login/index.php",
-                new com.microsoft.playwright.Page.NavigateOptions().setTimeout(45_000)
-                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
+        navigateLoginPage(page);
         page.locator("#username").fill(username);
         page.locator("#password").fill(password);
         page.locator("#loginbtn").click();
         waitUntilStable(page);
         page.waitForTimeout(600);
+    }
+
+    private static void navigateLoginPage(Page page) {
+        String url = Settings.BASE_URL + "/login/index.php";
+        RuntimeException last = null;
+        for (int i = 0; i < 4; i++) {
+            try {
+                page.navigate(url,
+                        new Page.NavigateOptions().setTimeout(90_000)
+                                .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
+                page.locator("#username").waitFor(new com.microsoft.playwright.Locator.WaitForOptions()
+                        .setTimeout(30_000));
+                return;
+            } catch (RuntimeException e) {
+                last = e;
+                if (!transientNavigationError(e)) {
+                    throw e;
+                }
+                page.waitForTimeout(2_000L * (i + 1));
+            }
+        }
+        if (last != null) {
+            throw last;
+        }
+    }
+
+    private static boolean transientNavigationError(RuntimeException e) {
+        String msg = String.valueOf(e.getMessage()).toLowerCase();
+        return msg.contains("timeout") || msg.contains("timed_out") || msg.contains("net::");
     }
 
     /** Login-page body text after a failed attempt (lockout / invalid credentials). */

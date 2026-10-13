@@ -122,33 +122,43 @@ public class UserProfile extends BasePage {
      */
     public boolean selfEnrolInCourse(String courseId) {
         openEnrolPage(courseId);
-        if (onCoursePage(courseId)) return true;
-        Locator enrol = selfEnrolControl();
-        boolean clicked = false;
-        for (int i = 0; i < enrol.count(); i++) {
-            try {
-                if (enrol.nth(i).isVisible()) {
-                    enrol.nth(i).click();
-                    clicked = true;
-                    break;
-                }
-            } catch (RuntimeException ignored) {}
+        // The enrolment page can still be loading/redirecting here; probe until it settles.
+        Locator control = null;
+        long deadline = System.currentTimeMillis() + 30_000;
+        while (System.currentTimeMillis() < deadline) {
+            if (onCoursePage(courseId)) return true;       // already enrolled -> Moodle redirects
+            control = firstVisible(selfEnrolControl());
+            if (control != null) break;
+            page.waitForTimeout(500);
         }
-        if (!clicked) {
-            try {
-                page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                        new Page.GetByRoleOptions().setName(java.util.regex.Pattern.compile("Enrol", java.util.regex.Pattern.CASE_INSENSITIVE)))
-                        .first().click();
-                clicked = true;
-            } catch (RuntimeException ignored) {}
+        if (control == null) {
+            System.out.println("[UserProfile] no Enrol me control for course " + courseId + " at " + page.url());
+            return false;
         }
-        page.waitForTimeout(1_500);
-        try { confirmModal(); } catch (Throwable ignored) {}
-        page.waitForTimeout(1_000);
+        control.click(new Locator.ClickOptions().setNoWaitAfter(true));
+        try {
+            page.waitForURL(url -> url.contains("/course/view.php") && !url.contains("/enrol/"),
+                    new Page.WaitForURLOptions().setTimeout(60_000));
+        } catch (RuntimeException notRedirected) {
+            // fall through: open the course directly to see whether the enrolment took
+        }
         if (!onCoursePage(courseId)) {
             openCourse(courseId);
         }
         return onCoursePage(courseId);
+    }
+
+    /** First visible match, or null; tolerates the page navigating mid-probe. */
+    private Locator firstVisible(Locator all) {
+        try {
+            int n = all.count();
+            for (int i = 0; i < n; i++) {
+                if (all.nth(i).isVisible()) return all.nth(i);
+            }
+        } catch (RuntimeException navigating) {
+            // "Execution context was destroyed" — the caller retries
+        }
+        return null;
     }
 
     private void openEnrolPage(String courseId) {
@@ -156,7 +166,12 @@ public class UserProfile extends BasePage {
                 new Page.NavigateOptions()
                         .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
                         .setTimeout(45_000));
-        page.waitForTimeout(1_200);
+        try {
+            page.waitForLoadState(com.microsoft.playwright.options.LoadState.LOAD,
+                    new Page.WaitForLoadStateOptions().setTimeout(30_000));
+        } catch (RuntimeException ignored) {
+            // selfEnrolInCourse polls for the control/redirect anyway
+        }
     }
 
     private Locator selfEnrolControl() {

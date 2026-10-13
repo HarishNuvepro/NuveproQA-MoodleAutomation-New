@@ -30,6 +30,12 @@ public class AssessmentAdmin extends BasePage {
 
     // manage challenges + override dropdown (manage-challenge.mustache)
     public static final String MC_TABLE   = "#np-ap-manage-challenge-table";
+    public static final String MANAGE_ATTEMPT_TABLE = "#np-ap-manage-attempt-table";
+    public static final String MANAGE_ACTIONS_BTN = "#np-ap-manage-actions-btn";
+    public static final String MANAGE_UPDATE_GRADES = "a#np-ap-manage-update-grades-btn.dropdown-item, "
+            + "#attempt-toolbar a#np-ap-manage-update-grades-btn";
+    public static final String USER_ATTEMPTS_TABLE = "#np-ap-user-attempts-table";
+    public static final String VIEW_USER_SUBMISSION = "#viewUserAttemptsSubmission";
     public static final String OVERRIDE_DROPDOWN = "#np-ap-cl-assessment-override-actions";
     public static final String OVERRIDE_ADD      = "#np-ap-cl-add-user-override";
 
@@ -64,12 +70,18 @@ public class AssessmentAdmin extends BasePage {
         throw last;
     }
 
-    /** Read the cloudlabs module-instance id ("sectionid" param) off the admin landing of an activity. */
+    /** Read the cloudlabs module-instance id ("sectionid" param) off the activity landing. */
     public String sectionIdFor(int cmid) {
         go(com.nuvepro.moodle.config.Settings.BASE_URL + "/mod/cloudlabs/view.php?id=" + cmid);
         page.waitForTimeout(3_000);
-        Locator sec = page.locator("#np-ap-cl-sectionId");
-        return sec.count() > 0 ? sec.first().inputValue() : "";
+        for (String sel : new String[]{
+                "#np-ap-gl-sectionId", "#np-ap-cl-sectionId", "input[name='sectionId']"}) {
+            Locator sec = page.locator(sel);
+            if (sec.count() == 0) continue;
+            String v = sec.first().inputValue();
+            if (v != null && !v.isBlank()) return v.trim();
+        }
+        return "";
     }
 
     /** The course id an activity belongs to (from the page body's "course-<N>" class). 0 if unknown. */
@@ -465,6 +477,309 @@ public class AssessmentAdmin extends BasePage {
 
     /** Drill from manage challenges → user attempts → View Submission → the Manage User Submissions page
      *  (manageuserattempt.php). Returns true only if reached (needs an existing attempt). */
+    /** Select the enrolled user row matching {@code emailOrUsername} on Manage Challenges. */
+    public boolean selectManageChallengeUser(String sectionId, String emailOrUsername) {
+        return selectManageChallengeUser(sectionId, emailOrUsername, null);
+    }
+
+    /** Match username or email (whichever appears in the manage-challenges table). */
+    public boolean selectManageChallengeUser(String sectionId, String username, String email) {
+        openManageChallenges(sectionId);
+        Locator rows = page.locator(MC_TABLE + " tbody tr:not(.no-records-found)");
+        for (int i = 0; i < rows.count(); i++) {
+            Locator row = rows.nth(i);
+            String text = row.innerText().toLowerCase();
+            boolean match = false;
+            if (username != null && !username.isBlank() && text.contains(username.toLowerCase())) match = true;
+            if (!match && email != null && !email.isBlank() && text.contains(email.toLowerCase())) match = true;
+            if (!match) continue;
+            Locator sel = row.locator("input[type=radio], input[name='btSelectItem']");
+            try {
+                if (sel.count() > 0) sel.first().check(new Locator.CheckOptions().setForce(true));
+                else row.click();
+            } catch (RuntimeException ignored) {}
+            page.waitForTimeout(600);
+            return true;
+        }
+        return false;
+    }
+
+    /** Poll manage-challenges until the user's completion status contains {@code fragment} (e.g. "completed"). */
+    public boolean waitForUserCompletionStatus(String sectionId, String username, String email,
+                                               String fragment, int maxSeconds) {
+        String want = fragment.toLowerCase();
+        int polls = Math.max(1, maxSeconds / 3);
+        for (int i = 0; i < polls; i++) {
+            if (userCompletionStatusContains(sectionId, username, email, want)) return true;
+            page.waitForTimeout(3_000);
+        }
+        return userCompletionStatusContains(sectionId, username, email, want);
+    }
+
+    public boolean userCompletionStatusContains(String sectionId, String username, String email, String fragment) {
+        openManageChallenges(sectionId);
+        Locator rows = page.locator(MC_TABLE + " tbody tr:not(.no-records-found)");
+        String want = fragment.toLowerCase();
+        for (int i = 0; i < rows.count(); i++) {
+            Locator row = rows.nth(i);
+            String text = row.innerText().toLowerCase();
+            boolean match = (username != null && !username.isBlank() && text.contains(username.toLowerCase()))
+                    || (email != null && !email.isBlank() && text.contains(email.toLowerCase()));
+            if (!match) continue;
+            Locator cell = row.locator("td[data-field='completionstatus']");
+            String status = cell.count() > 0 ? cell.first().innerText().trim().toLowerCase() : text;
+            return status.contains(want);
+        }
+        return false;
+    }
+
+    /** Manage-challenges completionstatus is {@code Completed} (Moodle activity completion for gating). */
+    public boolean userAssessmentCompleted(String sectionId, String username, String email) {
+        openManageChallenges(sectionId);
+        Locator rows = page.locator(MC_TABLE + " tbody tr:not(.no-records-found)");
+        for (int i = 0; i < rows.count(); i++) {
+            Locator row = rows.nth(i);
+            String text = row.innerText().toLowerCase();
+            boolean match = (username != null && !username.isBlank() && text.contains(username.toLowerCase()))
+                    || (email != null && !email.isBlank() && text.contains(email.toLowerCase()));
+            if (!match) continue;
+            Locator cell = row.locator("td[data-field='completionstatus']");
+            String status = cell.count() > 0 ? cell.first().innerText().trim().toLowerCase() : text;
+            return status.equals("completed") || status.startsWith("completed ");
+        }
+        return false;
+    }
+
+    /**
+     * After the student has submitted, set their grade on Manage User Submissions (manageuserattempt.php).
+     */
+    public boolean updateGradeForStudent(String sectionId, String username, String email, double grade) {
+        return updateGradeForStudent(sectionId, 0L, username, email, grade);
+    }
+
+    public boolean updateGradeForStudent(String sectionId, long moodleUserId, String username, String email,
+                                         double grade) {
+        if (!openManageUserSubmissionsForStudent(sectionId, moodleUserId, username, email)) return false;
+        return applyGradeOnManageUserSubmissionsPage(grade);
+    }
+
+    /** userattempts.php → Manage User Submissions for the seeded student (direct URL when userid is known). */
+    public boolean openManageUserSubmissionsForStudent(String sectionId, long moodleUserId, String username,
+                                                       String email) {
+        if (page.url().contains("manageuserattempt.php") && page.url().contains("sectionid=" + sectionId)) {
+            waitManageAttemptTableReady();
+            return true;
+        }
+        if (moodleUserId > 0) {
+            go(com.nuvepro.moodle.config.Settings.BASE_URL
+                    + "/mod/cloudlabs/userattempts.php?userid=" + moodleUserId + "&sectionid=" + sectionId);
+            if (drillToManageUserSubmissionsFromUserAttempts(120)) {
+                waitManageAttemptTableReady();
+                return true;
+            }
+        }
+        if (!selectManageChallengeUser(sectionId, username, email)) return false;
+        Locator ua = page.locator("#np-ap-user-attempt");
+        if (ua.count() == 0) return false;
+        try { ua.first().click(); } catch (RuntimeException ignored) {}
+        try { page.waitForURL("**/userattempts.php**", new Page.WaitForURLOptions().setTimeout(15_000)); }
+        catch (RuntimeException ignored) {}
+        if (!page.url().contains("userattempts.php")) return false;
+        if (!drillToManageUserSubmissionsFromUserAttempts(120)) return false;
+        waitManageAttemptTableReady();
+        return page.url().contains("manageuserattempt.php");
+    }
+
+    /** Wait for an attempt row, then open manageuserattempt.php (View Submission or direct link). */
+    private boolean drillToManageUserSubmissionsFromUserAttempts(int maxSeconds) {
+        int polls = Math.max(1, maxSeconds / 3);
+        for (int i = 0; i < polls; i++) {
+            waitTableLoaded(USER_ATTEMPTS_TABLE, 5);
+            if (selectFirstUserAttemptRow()) {
+                Locator viewBtn = page.locator(VIEW_USER_SUBMISSION);
+                if (viewBtn.count() > 0 && viewBtn.first().getAttribute("disabled") == null) {
+                    try { viewBtn.first().click(); } catch (RuntimeException ignored) {}
+                    if (waitForManageUserSubmissionsUrl(20_000)) return true;
+                }
+                Locator direct = page.locator("a[href*='manageuserattempt.php']");
+                if (direct.count() > 0) {
+                    try { direct.first().click(); } catch (RuntimeException ignored) {}
+                    if (waitForManageUserSubmissionsUrl(20_000)) return true;
+                }
+            }
+            refreshUserAttemptsTable();
+            page.waitForTimeout(3_000);
+        }
+        return page.url().contains("manageuserattempt.php");
+    }
+
+    private boolean waitForManageUserSubmissionsUrl(long timeoutMs) {
+        try {
+            page.waitForURL("**/manageuserattempt.php**",
+                    new Page.WaitForURLOptions().setTimeout(timeoutMs));
+            return true;
+        } catch (RuntimeException ignored) {
+            return page.url().contains("manageuserattempt.php");
+        }
+    }
+
+    private boolean selectFirstUserAttemptRow() {
+        Locator row = page.locator(USER_ATTEMPTS_TABLE + " tbody tr:not(.no-records-found)").first();
+        if (row.count() == 0) return false;
+        Locator sel = row.locator("input[type=radio], input[name='btSelectItem']");
+        try {
+            if (sel.count() > 0) sel.first().check(new Locator.CheckOptions().setForce(true));
+            else row.click();
+        } catch (RuntimeException ignored) {}
+        page.waitForTimeout(500);
+        return true;
+    }
+
+    private void refreshUserAttemptsTable() {
+        Locator refresh = page.locator("#user-attempts-toolbar button[name='btnAdd'], "
+                + "button[title*='Refresh'], .fixed-table-toolbar button[name='btnAdd']");
+        try {
+            if (refresh.count() > 0) refresh.first().click(new Locator.ClickOptions().setForce(true));
+        } catch (RuntimeException ignored) {}
+    }
+
+    /** Select a submission row, open Actions → Update Grades, save, then finalize MANUAL eval if needed. */
+    public boolean applyGradeOnManageUserSubmissionsPage(double grade) {
+        if (!page.url().contains("manageuserattempt.php")) return false;
+        waitManageAttemptTableReady();
+        if (!waitUntilManageAttemptGradable(120)) return false;
+        if (!openManageActionsUpdateGrades()) return false;
+        page.waitForTimeout(800);
+        Locator gradeInput = page.locator(
+                "#np-ap-manage-update-grade-input, input[name='grade'], #id_grade, "
+                        + "[data-region='modal-container'] input[type='number'], "
+                        + ".modal.show input[type='number'], input[type='number'][name*='grade']");
+        if (gradeInput.count() == 0) return false;
+        gradeInput.first().fill(String.valueOf(grade));
+        page.waitForTimeout(300);
+        Locator save = page.locator(
+                "#np-ap-manage-update-grade-save, [data-region='modal-container'] button:has-text('Save'), "
+                        + ".modal.show button:has-text('Save'), .modal.show button:has-text('Update'), "
+                        + "input[value='Save']");
+        if (save.count() > 0) {
+            try { save.first().click(new Locator.ClickOptions().setForce(true)); } catch (RuntimeException ignored) {}
+        } else {
+            confirmModal();
+        }
+        page.waitForTimeout(2_000);
+        dismissAlert();
+        finalizeManualAttemptAfterGrade();
+        page.waitForTimeout(1_500);
+        return true;
+    }
+
+    private void waitManageAttemptTableReady() {
+        waitTableLoaded(MANAGE_ATTEMPT_TABLE, 30);
+        for (int i = 0; i < 40; i++) {
+            if (page.locator(MANAGE_ATTEMPT_TABLE + " tbody tr[data-index]").count() > 0) return;
+            if (page.locator(MANAGE_ATTEMPT_TABLE + " tbody tr td").count() > 3
+                    && page.locator(MANAGE_ATTEMPT_TABLE + " .fixed-table-loading").count() == 0) {
+                return;
+            }
+            page.waitForTimeout(500);
+        }
+    }
+
+    /** After submit the attempt can sit in {@code Evaluating}; Actions stays disabled until it settles. */
+    private boolean waitUntilManageAttemptGradable(int maxSeconds) {
+        int polls = Math.max(1, maxSeconds / 3);
+        for (int i = 0; i < polls; i++) {
+            selectFirstManageAttemptRow();
+            if (manageActionsEnabled()) return true;
+            refreshManageAttemptTable();
+            page.waitForTimeout(3_000);
+        }
+        selectFirstManageAttemptRow();
+        return manageActionsEnabled();
+    }
+
+    private void selectFirstManageAttemptRow() {
+        Locator row = page.locator(MANAGE_ATTEMPT_TABLE + " tbody tr[data-index]").first();
+        if (row.count() == 0) {
+            row = page.locator(MANAGE_ATTEMPT_TABLE + " tbody tr").first();
+        }
+        if (row.count() == 0) return;
+        Locator cb = row.locator("input[name='btSelectItem']");
+        try {
+            if (cb.count() > 0) cb.first().check(new Locator.CheckOptions().setForce(true));
+            else row.click();
+        } catch (RuntimeException ignored) {}
+        page.waitForTimeout(400);
+    }
+
+    private boolean manageActionsEnabled() {
+        Locator actions = page.locator(MANAGE_ACTIONS_BTN);
+        if (actions.count() == 0) return false;
+        try {
+            return actions.first().getAttribute("disabled") == null;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private void refreshManageAttemptTable() {
+        Locator refresh = page.locator("#attempt-toolbar button[name='btnAdd'], "
+                + "#attempt-toolbar button[title*='Refresh']");
+        try {
+            if (refresh.count() > 0) refresh.first().click(new Locator.ClickOptions().setForce(true));
+        } catch (RuntimeException ignored) {}
+    }
+
+    private boolean openManageActionsUpdateGrades() {
+        Locator actions = page.locator(MANAGE_ACTIONS_BTN);
+        if (actions.count() == 0 || actions.first().getAttribute("disabled") != null) return false;
+        try { actions.first().click(new Locator.ClickOptions().setForce(true)); } catch (RuntimeException e) {
+            return false;
+        }
+        page.waitForTimeout(400);
+        Locator gradeItem = page.locator(MANAGE_UPDATE_GRADES);
+        if (gradeItem.count() == 0) return false;
+        try { gradeItem.first().click(new Locator.ClickOptions().setForce(true)); } catch (RuntimeException e) {
+            return false;
+        }
+        return true;
+    }
+
+    /** MANUAL evaluation: after a grade is saved, publish/evaluate the attempt so Moodle completion can sync. */
+    private void finalizeManualAttemptAfterGrade() {
+        clickIfEnabled("#np-ap-manage-eval-result-btn");
+        page.waitForTimeout(1_200);
+        dismissAlert();
+        clickIfEnabled("#np-ap-manage-sync-result-btn");
+        page.waitForTimeout(1_200);
+        dismissAlert();
+        openManageActionsMenuItem("#np-ap-manage-submit-challenge-btn");
+        page.waitForTimeout(1_200);
+        dismissAlert();
+        confirmModal();
+    }
+
+    private void openManageActionsMenuItem(String itemSelector) {
+        if (!manageActionsEnabled()) selectFirstManageAttemptRow();
+        if (!manageActionsEnabled()) return;
+        try { page.locator(MANAGE_ACTIONS_BTN).first().click(new Locator.ClickOptions().setForce(true)); }
+        catch (RuntimeException ignored) { return; }
+        page.waitForTimeout(300);
+        Locator item = page.locator(itemSelector);
+        if (item.count() == 0) return;
+        try { item.first().click(new Locator.ClickOptions().setForce(true)); } catch (RuntimeException ignored) {}
+    }
+
+    private void clickIfEnabled(String selector) {
+        Locator btn = page.locator(selector);
+        if (btn.count() == 0) return;
+        try {
+            if (btn.first().getAttribute("disabled") != null) return;
+            if (!btn.first().isVisible()) return;
+            btn.first().click(new Locator.ClickOptions().setForce(true));
+        } catch (RuntimeException ignored) {}
+    }
+
     public boolean openManageUserSubmissions(String sectionId) {
         if (!openFirstUserAttemptsPage(sectionId)) return false;   // now on userattempts.php
         Locator row = page.locator("#np-ap-user-attempts-table tbody tr:not(.no-records-found)").first();

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
+<!-- Five concurrent Cucumber scenarios (headless via -Pparallel). -->
+<suite name="MoodleParallelSuite5" verbose="1" data-provider-thread-count="5">
+    <test name="Parallel5">
+        <classes>
+            <class name="com.nuvepro.moodle.RunParallelTest"/>
+        </classes>
+    </test>
+</suite>

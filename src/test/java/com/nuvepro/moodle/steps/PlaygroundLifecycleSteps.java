@@ -11,6 +11,7 @@ import com.nuvepro.moodle.helpers.Auth;
 import com.nuvepro.moodle.helpers.CloudLabsClient;
 import com.nuvepro.moodle.helpers.SandboxCourse;
 import com.nuvepro.moodle.helpers.SandboxUserRegistry;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ManageLabs;
 import com.nuvepro.moodle.pages.PlaygroundControlPanel;
 import com.nuvepro.moodle.pages.PlaygroundLanding;
@@ -334,7 +335,7 @@ public class PlaygroundLifecycleSteps {
 
     @Given("a student opens the sandbox activity")
     public void aStudentOpensTheSandboxActivity() {
-        ctx.studentContext = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        ctx.studentContext = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         Page sp = ctx.studentContext.newPage();
         sp.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
@@ -458,64 +459,6 @@ public class PlaygroundLifecycleSteps {
             if (body.contains("error") || body.contains("failed")) { errorShown = true; break; }
         }
         assertTrue(errorShown, "no clear error surfaced for the misconfigured template");
-    }
-
-    @Then("the expired-duration lab state is verified")
-    public void expiredDurationVerified() {
-        if (!CloudLabsClient.isConfigured()) {
-            throw new SkipException("CloudLabs API not configured");
-        }
-        if (CloudLabsClient.isBlocked()) {
-            throw new SkipException("CloudLabs account is temporarily blocked — cannot expire the lab");
-        }
-        if (ctx.newActivityCmid == null || ctx.newActivityCmid.isBlank()) {
-            throw new SkipException("no sandbox activity cmid — run the create step first");
-        }
-        long courseId = SandboxCourse.idLong();
-        ApiClient.SeededUser student = ApiClient.createUser(System.currentTimeMillis());
-        ApiClient.enrolUser(student.id, courseId, 5);
-        SandboxUserRegistry.put(courseId, student);
-        BrowserContext studentCtx = ctx.browser.newContext(new Browser.NewContextOptions()
-                .setBaseURL(Settings.BASE_URL)
-                .setIgnoreHTTPSErrors(true));
-        Page studentPage = studentCtx.newPage();
-        studentPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
-        try {
-            Auth.uiLogin(studentPage, student.username, student.password);
-            PlaygroundLanding landing = new PlaygroundLanding(studentPage);
-            landing.open(Integer.parseInt(ctx.newActivityCmid));
-            landing.openLabConsole();
-            PlaygroundControlPanel panel = new PlaygroundControlPanel(studentPage);
-            panel.expectControlPanelLoaded(90_000);
-            if (!panel.waitUntilLabLoaded(8)) {
-                panel.clickStartLab();
-                assertTrue(panel.waitUntilLabLoaded(180), "lab did not load before expire");
-            }
-            String labId = panel.labId();
-            assertTrue(labId != null && !labId.isBlank(), "no lab id to expire");
-            assertTrue(CloudLabsClient.expireLab(labId), "CloudLabs expireLab failed for " + labId);
-            landing.open(Integer.parseInt(ctx.newActivityCmid));
-            boolean expired = false;
-            String remaining = "";
-            for (int i = 0; i < 18 && !expired; i++) {
-                remaining = "";
-                Locator rem = studentPage.locator("#lab-remaining-pl");
-                if (rem.count() > 0) remaining = rem.first().innerText().trim();
-                String body = studentPage.locator("body").innerText().toLowerCase();
-                String norm = remaining.toLowerCase().replaceAll("\\s+", "");
-                if (norm.equals("0h") || norm.equals("0") || norm.equals("0h0m") || norm.equals("00:00")
-                        || body.contains("expired") || body.contains("duration is over")) {
-                    expired = true;
-                } else {
-                    studentPage.waitForTimeout(5_000);
-                    landing.open(Integer.parseInt(ctx.newActivityCmid));
-                }
-            }
-            assertTrue(expired, "expired lab did not show 00:00 / expired (remaining='" + remaining + "')");
-            System.out.println("[SB-user] expired-duration OK labId=" + labId + " remaining=" + remaining);
-        } finally {
-            try { studentCtx.close(); } catch (Throwable ignored) {}
-        }
     }
 
     @Then("the unlimited-duration lab is verified")

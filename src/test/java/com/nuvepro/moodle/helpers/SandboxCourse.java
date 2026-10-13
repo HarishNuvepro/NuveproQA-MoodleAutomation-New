@@ -7,13 +7,11 @@ import com.nuvepro.moodle.pages.CourseAdmin;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
 /**
  * One throwaway Moodle course for the whole Sandbox suite ({@code @SB-*}).
@@ -22,7 +20,6 @@ import java.util.Properties;
  */
 public final class SandboxCourse {
     private static final Path FILE = Paths.get("target", "sandbox-course.properties");
-    private static final Path LOCK = Paths.get("target", "sandbox-course.lock");
 
     private SandboxCourse() {}
 
@@ -35,11 +32,9 @@ public final class SandboxCourse {
             }
             return id;
         }
-        try {
-            Files.createDirectories(LOCK.getParent());
-            try (FileChannel ch = FileChannel.open(LOCK,
-                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                 FileLock ignored = ch.lock()) {
+        try (CrossProcessLock cross = CrossProcessLock.named("sandbox-course")) {
+            cross.lock(5, TimeUnit.MINUTES);
+            synchronized (SandboxCourse.class) {
                 String existing = readId();
                 if (!existing.isBlank() && courseExists(page, existing)) {
                     return existing;
@@ -52,8 +47,6 @@ public final class SandboxCourse {
                 }
                 return createLocked(page);
             }
-        } catch (IOException e) {
-            throw new RuntimeException("sandbox course lock failed: " + e.getMessage(), e);
         }
     }
 

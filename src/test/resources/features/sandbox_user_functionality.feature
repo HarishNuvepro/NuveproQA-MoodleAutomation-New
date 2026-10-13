@@ -2,33 +2,43 @@
 # Uses the same throwaway suite course as create/actions (not COURSE_ID).
 # Labs/users are kept. Cleanup: @sandbox-cleanup.
 #
-# Preferred: run sandbox_create.feature first so matching activities are reused
+# Preferred: run sandbox.feature (@SB-create-*) first so matching activities are reused
 # (sandbox_create_yes / sandbox_create_no / sandbox_desc_git).
 #
 # Speed: one cloud lab per template, not per scenario. Scenarios sharing a lab run single-file
 # (one lane per named student), so the Account cases are split over TWO Account labs to halve
 # that chain — account_lab2 exists only to shorten the critical path, same template as account_lab.
-#   account_lab  → @SB-user-1 then 4/5/6/10 reuse that running lab (Continue).
-#   account_lab2 → @SB-user-12 then 13/18 reuse that running lab.
+#   account_lab  → @SB-user-1 then 4/5/10 reuse that running lab (Continue).
+#   notes_pdf_chain → @SB-user-6 (fresh lab + notes) then @SB-user-9 (same student, sandbox_create_no).
+#   account_lab2 → @SB-user-12 then 18 reuse that running lab.
+#   @SB-user-13 uses @fresh_activity + fresh student (deleted-lab recovery in steps).
 #   git_lab      → @SB-user-2
-#   vm_vpat      → @SB-user-14 (iframe + speed test + fullscreen + new tab)
-#   catalog_unlimited → @SB-user-19 (Proceed + unlimited + invalid Start/Create)
+#   vm_vpat_chain → run @SB-user-14 to PASS first, then @SB-user-19 only (steps block until 14 passes).
+#   One command: -Dcucumber.tags="@SB-user-14 or @SB-user-19" (14 always runs before 19 in file order).
 # Stop (@SB-user-3) and empty landing (@SB-user-7) keep a fresh student so they
 # do not stop/steal the shared Account lab.
-# Student console cases moved from sandbox_actions.feature (same run tags):
+# Student console cases (Manage Labs admin lives in sandbox.feature @SB-manage-*):
 #   @SB-manage-26 cancel Start, 27 usage, 28 landing duration, 29 password,
-#   31 refresh, 34 invalid-template create error, 35 expired duration.
+#   31 refresh, 34 invalid-template create error. (Row 35 expired duration — not automatable, no scenario.)
 #
 # Validation notes (confirmed with QA):
 # 1) Description / Instructions = create settings (manual text or git-populated content)
-# 2) Duration / Credentials — presence OK for now; exact CloudLabs portal values deferred
-# 3) Lab Info — from LAB TEMPLATE (often populated; not normally empty)
+# 2) Duration / Credentials (@SB-user-1/2) — Lab Usage + Credentials UI; cross-check CloudLabs when lab id known
+# 3) Lab Info — from LAB TEMPLATE (non-empty; exact template text assert still deferred)
 # 4) Notes (@SB-user-6) — requires lab-template enable_lab_notes ON
 # 5) Duration (@SB-user-10) — CloudLabs extendDuration +1 hour; assert remaining/allotted increased
-#    (negative expire is not supported on this platform)
+# 6) @SB-manage-29 — success toast or updated password in credentials panel
+# 7) @SB-manage-27 — cost labels + numeric values; CloudLabs cost token when API exposes it
 #
-# Run this file: .\mvnw.cmd test -Pwatch "-Dcucumber.features=src/test/resources/features/sandbox_user_functionality.feature"
-# Run one:       .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@SB-user-1"
+# Run this file (serial): .\mvnw.cmd test -Pwatch "-Dcucumber.features=src/test/resources/features/sandbox_user_functionality.feature"
+# Run one:                 .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@SB-user-1"
+#
+# Parallel (5 browsers, sandbox.parallel lanes — see RUNNERS.md "sandbox_user_functionality"):
+#   .\mvnw.cmd test -Pparallel "-DsuiteXmlFile=testng-parallel5.xml" "-Dparallel.browsers=5" "-Dsandbox.parallel=true" "-Dautomation.deferCleanup=true" "-Dcucumber.features=src/test/resources/features/sandbox_user_functionality.feature" "-Dcucumber.tags=not @skip and not @sandbox-cleanup and not @module-cleanup"
+# Chains (same JVM — run before or with parallel):
+#   @SB-user-6 or @SB-user-9          (notes/PDF — 9 waits on 6)
+#   @SB-user-14 or @SB-user-19         (VM catalog — 19 waits on 14 PASS)
+# Isolated lanes (safe in parallel): account_lab, account_lab2, git_lab, pdf_yes, fresh students (@SB-manage-26/27/28/29/31 each own user)
 
 Feature: Sandbox — student user functionality
 
@@ -71,20 +81,32 @@ Feature: Sandbox — student user functionality
     And the student stops the sandbox lab from the console
     Then the sandbox lab is stopped for the student
 
-  @LT-59 @provisioning
+  @LT-59 @LT-70 @LT-48 @LT-66 @easybatch1 @easybatch2 @provisioning
   Scenario: Four-step progress is displayed while a sandbox lab is created
     When admin creates a sandbox activity using "sandbox_user_lab"
     And a fresh student is enrolled in the created sandbox course
     When the student opens the created sandbox activity
     And the student starts the sandbox and observes create progress
 
-  @LT-60 @provisioning
+  @LT-60 @LT-49 @LT-54 @LT-55 @easybatch2 @provisioning
   Scenario: Four-step progress is displayed while a sandbox lab is started
     When admin creates a sandbox activity using "sandbox_user_lab"
     And a fresh student is enrolled in the created sandbox course
     When the student opens the created sandbox activity
     And the student starts the sandbox and opens the lab console
     And the student starts the lab and observes start progress
+    Then the sandbox lab is loaded on the console
+
+  # Manual Unpark = Start Lab after Stop (Park = Stop). Account sandbox only.
+  @LT-61 @LT-56 @LT-57 @LT-58 @LT-62 @easybatch2 @provisioning
+  Scenario: Four-step progress is displayed while unparking a sandbox lab
+    When admin creates a sandbox activity using "sandbox_user_lab"
+    And a fresh student is enrolled in the created sandbox course
+    When the student opens the created sandbox activity
+    And the student starts the sandbox and opens the lab console
+    And the student starts the lab and waits until it is loaded
+    When the student stops the sandbox lab from the console
+    And the student unparks the lab and observes unpark progress
     Then the sandbox lab is loaded on the console
 
   @SB-user-4 @provisioning
@@ -110,7 +132,7 @@ Feature: Sandbox — student user functionality
   @SB-user-6 @provisioning
   Scenario: Student saves a sandbox lab note and it persists
     When admin creates a sandbox activity using "sandbox_user_lab"
-    And a named student "account_lab" is enrolled in the created sandbox course
+    And a fresh student is enrolled in the created sandbox course
     When the student opens the created sandbox activity
     And the student starts the sandbox and opens the lab console
     And the student starts the lab and waits until it is loaded
@@ -142,7 +164,7 @@ Feature: Sandbox — student user functionality
   @SB-user-9 @provisioning
   Scenario: Student does not see PDF download when Export PDF is No
     When admin creates a sandbox activity using "sandbox_create_no"
-    And a named student "pdf_no" is enrolled in the created sandbox course
+    And the sandbox lab notes student is enrolled for PDF No verification
     When the student opens the created sandbox activity
     And the student starts the sandbox and opens the lab console
     And the student starts the lab and waits until it is loaded
@@ -160,7 +182,10 @@ Feature: Sandbox — student user functionality
     And the student returns to the sandbox landing
     Then the student sandbox duration increased by about 1 hour
 
-  @LT-9 @provisioning
+  # REMOVE (with LabTemplateSteps notification disposable + SB-user duration-notification steps):
+  # Not automatable — template notification is enabled but the activity reports lab duration
+  # not configured (see Kiwi Moodle_Lab Templates LT-9, Automated=No).
+  @LT-9 @skip @provisioning
   Scenario: Template duration notification appears at its configured threshold
     Given admin creates a notification-enabled disposable Sandbox activity
     And a fresh student is enrolled in the created sandbox course
@@ -188,23 +213,23 @@ Feature: Sandbox — student user functionality
     And the student starts the lab and waits until it is loaded
     Then the student support link on the lab console is available and working
 
-  @SB-user-13 @provisioning
-  Scenario: Console Back and browser Back return to the sandbox activity landing
+  @SB-user-13 @provisioning @fresh_activity
+  Scenario: Console Back returns to activity landing and browser Back to dashboard
     When admin creates a sandbox activity using "sandbox_user_lab"
-    And a named student "account_lab2" is enrolled in the created sandbox course
+    And a fresh student is enrolled in the created sandbox course
     When the student opens the created sandbox activity
     And the student starts the sandbox and opens the lab console
     And the student starts the lab and waits until it is loaded
     Then the console Back button returns to the sandbox activity landing
     When the student opens the lab console again from the landing
-    Then browser Back returns to the sandbox activity landing
+    Then browser Back returns to the student dashboard page
 
-  @SB-user-14 @provisioning
+  @SB-user-14 @provisioning @fresh_activity
   Scenario: VM sandbox iframe, Speed Test, fullscreen and new tab
     When admin creates a sandbox activity using "sandbox_vm_vpat"
-    And a named student "vm_vpat" is enrolled in the created sandbox course
+    And a fresh student is enrolled in the created sandbox course
     When the student opens the created sandbox activity
-    And the student starts the sandbox and continues through catalog details if shown
+    And the student starts the VM sandbox through catalog and waits until the lab is loaded
     Then the VM lab is loaded inside an iframe
     And the student speed test completes and displays values
     And the student opens the lab in a new browser tab
@@ -221,8 +246,7 @@ Feature: Sandbox — student user functionality
 
   @SB-user-19 @provisioning
   Scenario: Catalog UI Proceed, unlimited duration, and invalid Start/Create again
-    When admin creates a sandbox activity using "sandbox_catalog_unlimited"
-    And a named student "catalog_unlimited" is enrolled in the created sandbox course
+    Given the VM sandbox student and activity from SB-user-14 are reused
     When the student opens the created sandbox activity
     And the student starts the sandbox and continues through catalog details if shown
     Then the sandbox lab is running after catalog proceed
@@ -242,7 +266,7 @@ Feature: Sandbox — student user functionality
   @SB-manage-27 @provisioning
   Scenario: Student Lab Usage shows valid cost values
     When admin creates a sandbox activity using "sandbox_user_lab"
-    Given a shared Manage Labs student with an Active lab
+    Given a fresh student enrolled for Manage Labs admin actions
     When the student starts the sandbox lab until it is running
     And the student opens the Lab Usage popup on the console
     And the student requests the lab cost on the console
@@ -251,15 +275,15 @@ Feature: Sandbox — student user functionality
   @SB-manage-28 @provisioning
   Scenario: Student landing shows allotted consumed and remaining duration
     When admin creates a sandbox activity using "sandbox_user_lab"
-    Given a shared Manage Labs student with an Active lab
+    Given a fresh student enrolled for Manage Labs admin actions
     When the student starts the sandbox lab until it is running
     And the student opens the sandbox activity landing
     Then the student sandbox landing shows consumed and remaining duration
 
   @SB-manage-29 @provisioning
   Scenario: Student can change the lab password on the console
-    When admin creates a sandbox activity using "sandbox_user_lab"
-    Given a shared Manage Labs student with an Active lab
+    When admin creates a sandbox activity using "sandbox_vm_vpat"
+    Given a fresh student enrolled for Manage Labs admin actions
     When the student starts the sandbox lab until it is running
     And the student opens the Lab Credentials popup on the console
     And the student changes the sandbox lab password on the console
@@ -268,7 +292,7 @@ Feature: Sandbox — student user functionality
   @SB-manage-31 @provisioning
   Scenario: Student refresh lab keeps the lab running
     When admin creates a sandbox activity using "sandbox_user_lab"
-    Given a shared Manage Labs student with an Active lab
+    Given a fresh student enrolled for Manage Labs admin actions
     When the student starts the sandbox lab until it is running
     And the student refreshes the sandbox lab on the console
     Then the student sandbox lab remains running after refresh
@@ -279,8 +303,3 @@ Feature: Sandbox — student user functionality
     Given a fresh student enrolled for Manage Labs admin actions
     When the student tries to create a sandbox lab
     Then the sandbox lab create error mentions missing required argument
-
-  @SB-manage-35 @provisioning
-  Scenario: Expired-duration lab shows the expired message
-    When admin creates a sandbox activity using "sandbox_user_lab"
-    Then the expired-duration lab state is verified

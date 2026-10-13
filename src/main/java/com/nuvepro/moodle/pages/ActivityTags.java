@@ -71,8 +71,7 @@ public class ActivityTags extends BasePage {
     /** Save (Save and display -> the activity view). */
     public void save() {
         Locator save = page.locator("#id_submitbutton");
-        (save.count() > 0 ? save : page.locator("#id_submitbutton2")).first().click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage((save.count() > 0 ? save : page.locator("#id_submitbutton2")).first());
         page.waitForTimeout(2_000);
     }
 
@@ -85,6 +84,30 @@ public class ActivityTags extends BasePage {
         openEdit(cmid);
         expandTags();
         return chipPresent(tag);
+    }
+
+    public int tagCountCaseInsensitive(int cmid, String tag) {
+        openEdit(cmid);
+        expandTags();
+        String lower = tag.toLowerCase();
+        int n = 0;
+        Locator chips = page.locator(".form-autocomplete-selection [role='option'], "
+                + ".form-autocomplete-selection [role='listitem']");
+        for (int i = 0; i < chips.count(); i++) {
+            if (chips.nth(i).innerText().trim().toLowerCase().equals(lower)) n++;
+        }
+        return n;
+    }
+
+    public void removeTag(String tag) {
+        expandTags();
+        Locator chip = page.locator(".form-autocomplete-selection [role='option']:has-text('" + tag + "'), "
+                + ".form-autocomplete-selection [role='listitem']:has-text('" + tag + "')").first();
+        if (chip.count() > 0) {
+            Locator remove = chip.locator("[aria-label*='Remove'], .close, button");
+            if (remove.count() > 0) remove.first().click();
+            page.waitForTimeout(500);
+        }
     }
 
     /**

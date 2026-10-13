@@ -9,6 +9,7 @@ import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
 import com.nuvepro.moodle.helpers.SandboxTestData;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.AllCoursesPage;
 import com.nuvepro.moodle.pages.ChallengeActivityForm;
 import com.nuvepro.moodle.pages.CourseAdmin;
@@ -101,6 +102,7 @@ public final class AllCoursesSteps {
         String id = admin.createCourse(name, "acp" + stamp + courseIds.size());
         courseIds.add(id);
         expectedCourseIds.put(name, id);
+        com.nuvepro.moodle.helpers.AutomationManifest.registerAllCoursesCourse(id);
         return name;
     }
 
@@ -109,6 +111,7 @@ public final class AllCoursesSteps {
                 categoryId, visible, summary);
         courseIds.add(id);
         expectedCourseIds.put(name, id);
+        com.nuvepro.moodle.helpers.AutomationManifest.registerAllCoursesCourse(id);
         return id;
     }
 
@@ -125,7 +128,7 @@ public final class AllCoursesSteps {
 
     private Page loginAsCredentials(String username, String password) {
         closeUserContext();
-        userContext = ctx.browser.newContext(new Browser.NewContextOptions()
+        userContext = BrowserUi.newContext(ctx.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         userPage = userContext.newPage();
         userPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
@@ -386,9 +389,25 @@ public final class AllCoursesSteps {
     @When("admin duplicates the temporary course")
     public void duplicateTemporaryCourse() {
         copiedName = courseName + "_Copy";
-        copiedId = admin.duplicateCourse(courseId, copiedName,
-                "acpcopy" + stamp, "1");
-        courseIds.add(copiedId);
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                copiedId = admin.duplicateCourse(courseId, copiedName,
+                        "acpcopy" + stamp, "1");
+                courseIds.add(copiedId);
+                return;
+            } catch (RuntimeException e) {
+                last = e;
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (attempt < 3 && (msg.contains("Execution context was destroyed")
+                        || msg.contains("course copy did not complete"))) {
+                    ctx.page.waitForTimeout(2_000);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (last != null) throw last;
     }
 
     @Then("the duplicated course is listed in All Courses")
@@ -532,8 +551,7 @@ public final class AllCoursesSteps {
     @When("admin refreshes filters adds deletes hides and shows course fixtures")
     public void lifecycleOrderingChanges() {
         assertOrdered(beforeNames, "initial courses");
-        ctx.page.reload();
-        ctx.page.waitForTimeout(700);
+        all.open();
         all.search("ACPOrder");
         String added = "ACPOrderBeta_" + stamp;
         createCourse(added, "1", true, "ordering");
@@ -588,11 +606,20 @@ public final class AllCoursesSteps {
 
     @Then("the imported course appears in alphabetical order")
     public void importedCourseOrdered() {
-        all.open();
-        all.search("ACPImp");
-        List<String> names = all.visibleCourseNames().stream()
-                .filter(n -> n.toLowerCase(Locale.ROOT).contains("acpimp"))
-                .toList();
+        List<String> names = List.of();
+        for (int attempt = 0; attempt < 6; attempt++) {
+            all.open();
+            all.search("ACPImp");
+            names = all.visibleCourseNames().stream()
+                    .filter(n -> n.toLowerCase(Locale.ROOT).contains("acpimp"))
+                    .toList();
+            if (names.stream().anyMatch(n -> n.equalsIgnoreCase(copiedName)
+                    || n.toLowerCase(Locale.ROOT).contains(copiedName.toLowerCase(Locale.ROOT)))
+                    && names.size() >= 4) {
+                break;
+            }
+            ctx.page.waitForTimeout(2_000);
+        }
         assertTrue(names.stream().anyMatch(n -> n.equalsIgnoreCase(copiedName)
                         || n.toLowerCase(Locale.ROOT).contains(copiedName.toLowerCase(Locale.ROOT))),
                 "imported course is not listed: " + copiedName + " in " + names);
@@ -763,6 +790,7 @@ public final class AllCoursesSteps {
         firstBatchCount = all.visibleCardCount();
         catalogResponses = all.observeCatalogResponses(all::rapidScroll);
         all.scrollToEnd();
+        all.waitForCatalogReady();
         afterNames = all.visibleCourseNames();
     }
 
@@ -775,11 +803,25 @@ public final class AllCoursesSteps {
     @Then("later unique batches append with a transient loader and no pagination controls")
     public void laterBatchesUniqueNoPager() {
         assertTrue(afterNames.size() > firstBatchCount, "later course batch did not append");
-        List<String> ids = all.visibleCourseIds();
+        List<String> ids = List.of();
+        List<String> names = afterNames;
+        for (int attempt = 0; attempt < 6; attempt++) {
+            all.waitForCatalogReady();
+            ids = all.visibleCourseIds();
+            names = all.visibleCourseNames();
+            boolean uniqueIds = ids.isEmpty()
+                    || new HashSet<>(ids).size() == ids.size();
+            boolean uniqueNames = new HashSet<>(names).size() == names.size();
+            if (uniqueIds && uniqueNames) break;
+            all.scrollToEnd();
+            ctx.page.waitForTimeout(1_500);
+        }
         if (!ids.isEmpty()) {
-            assertEquals(new HashSet<>(ids).size(), ids.size(), "duplicate course ids across batches");
+            assertEquals(new HashSet<>(ids).size(), ids.size(),
+                    "duplicate course ids across batches: " + ids);
         } else {
-            assertEquals(new HashSet<>(afterNames).size(), afterNames.size(), "duplicate cards across batches");
+            assertEquals(new HashSet<>(names).size(), names.size(),
+                    "duplicate cards across batches: " + names);
         }
         assertFalse(all.hasPaginationControls(), "legacy pagination controls are visible");
     }
@@ -1090,7 +1132,7 @@ public final class AllCoursesSteps {
     public void guestOpensCatalog() {
         String url = all.url();
         closeUserContext();
-        userContext = ctx.browser.newContext(new Browser.NewContextOptions()
+        userContext = BrowserUi.newContext(ctx.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         userPage = userContext.newPage();
         userPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
@@ -1118,6 +1160,10 @@ public final class AllCoursesSteps {
             return;
         }
         closeUserContext();
+        if (!com.nuvepro.moodle.helpers.CleanupPolicy.runScenarioCleanup()) {
+            System.out.println("[ACP] deferCleanup=true — courses left for @cleanup-all-courses");
+            return;
+        }
         // Deleting the course releases any sandbox lab under it, so no Manage Labs teardown here.
         // Delete children/courses before categories. Each cleanup is best effort so it never masks
         // the scenario result; unique ACP prefixes make any residue easy to identify.

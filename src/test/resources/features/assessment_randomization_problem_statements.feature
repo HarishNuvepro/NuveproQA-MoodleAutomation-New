@@ -8,7 +8,7 @@ Feature: Assessment — Randomization / Problem Statements
   Scenario: The normal assessment workflow works end to end
     Then this case needs a live attempt, an integration session, or a course-management action
 
-  @A233
+  @A233 @mediumbatch1
   Scenario: The randomized problem statement field is present on the challenge form
     Given a new assessment challenge activity form
     Then the randomized problem statement field is present

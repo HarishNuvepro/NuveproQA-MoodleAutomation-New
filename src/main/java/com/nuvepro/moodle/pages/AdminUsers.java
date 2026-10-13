@@ -3,13 +3,21 @@ package com.nuvepro.moodle.pages;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.WaitForSelectorState;
+import com.nuvepro.moodle.helpers.CrossProcessLock;
 import com.nuvepro.moodle.helpers.UserSpec;
+
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Standard Moodle user administration: Add user form (/user/editadvanced.php),
  * user list (/admin/user.php), edit/suspend/delete. No cloudlabs — pure Moodle core.
  */
 public class AdminUsers extends BasePage {
+    /** Report-builder filters on /admin/user.php are not safe under concurrent admin sessions. */
+    private static final ReentrantLock BROWSE_USERS_FILTER_LOCK = new ReentrantLock(true);
+    private static final CrossProcessLock BROWSE_USERS_FILTER_CROSS =
+            CrossProcessLock.named("admin-browse-users-filter");
     public AdminUsers(Page page) {
         super(page);
     }
@@ -62,6 +70,129 @@ public class AdminUsers extends BasePage {
                 || body.contains("invalid");
     }
 
+    /** Add-user fields that must report their own error when left empty (label -> form element name). */
+    public static final java.util.Map<String, String> REQUIRED_ADD_USER_FIELDS = java.util.Map.of(
+            "username", "username",
+            "password", "newpassword",
+            "first name", "firstname",
+            "last name", "lastname",
+            "email", "email");
+
+    /** Visible error text per add-user field (label -> text); fields without an error are omitted. */
+    public java.util.Map<String, String> addUserFieldErrors() {
+        java.util.Map<String, String> errors = new java.util.TreeMap<>();
+        for (int attempt = 0; attempt < 15; attempt++) {
+            errors.clear();
+            collectAddUserFieldErrors(errors);
+            if (!errors.isEmpty() || leftTheForm()) {
+                return errors;
+            }
+            page.waitForTimeout(400);
+        }
+        collectAddUserFieldErrors(errors);
+        return errors;
+    }
+
+    private void collectAddUserFieldErrors(java.util.Map<String, String> errors) {
+        for (java.util.Map.Entry<String, String> field : REQUIRED_ADD_USER_FIELDS.entrySet()) {
+            Object text = page.evaluate("""
+                    (name) => {
+                      const el = document.getElementById('id_error_' + name);
+                      if (!el) return '';
+                      return (el.innerText || el.textContent || '').trim();
+                    }
+                    """, field.getValue());
+            String value = text == null ? "" : String.valueOf(text).trim();
+            if (!value.isEmpty()) {
+                errors.put(field.getKey(), value);
+            }
+        }
+        mergePasswordError(errors, passwordFieldFeedbackText());
+        mergePasswordError(errors, passwordNotificationText());
+    }
+
+    private static void mergePasswordError(java.util.Map<String, String> errors, String text) {
+        if (text == null || text.isBlank()) return;
+        errors.merge("password", text.trim(), (a, b) -> a.contains(b) ? a : a + " " + b);
+    }
+
+    /** Password-unmask / fitem feedback (Moodle sometimes omits {@code #id_error_newpassword}). */
+    private String passwordFieldFeedbackText() {
+        Object text = page.evaluate("""
+                () => {
+                  const root = document.getElementById('fitem_id_newpassword')
+                      || document.querySelector('[data-fieldtype="passwordunmask"]')?.closest('.fitem');
+                  if (!root) return '';
+                  for (const sel of ['.form-control-feedback', '.invalid-feedback', '[id^="id_error_"]']) {
+                    const el = root.querySelector(sel);
+                    if (el) {
+                      const t = (el.innerText || el.textContent || '').trim();
+                      if (t.length > 0) return t;
+                    }
+                  }
+                  return '';
+                }
+                """);
+        return text == null ? "" : String.valueOf(text).trim();
+    }
+
+    private String passwordNotificationText() {
+        Object text = page.evaluate("""
+                () => {
+                  const nodes = [...document.querySelectorAll(
+                      '.notifyproblem, .alert-danger, .alert-warning, [role="alert"]')];
+                  for (const el of nodes) {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (/password/i.test(t)) return t;
+                  }
+                  return '';
+                }
+                """);
+        return text == null ? "" : String.valueOf(text).trim();
+    }
+
+    /** Keep "Generate password and notify user" off so the empty password is validated. */
+    public void untickGeneratePassword() {
+        Locator gen = page.locator("#id_createpassword");
+        if (gen.count() > 0 && gen.first().isChecked()) gen.first().uncheck();
+    }
+
+    /**
+     * Post the add-user form without the browser-side checks. Moodle validates username and password
+     * only on the server, and its browser checks block the post while other fields are empty.
+     */
+    public void submitAddUserToServer() {
+        page.evaluate("() => { window.__npSubmitPending = true;"
+                + " document.getElementById('id_username').form.submit(); }");
+        long deadline = System.currentTimeMillis() + 60_000;
+        while (System.currentTimeMillis() < deadline) {
+            page.waitForTimeout(300);
+            try {
+                if (!Boolean.TRUE.equals(page.evaluate("() => window.__npSubmitPending === true"))) {
+                    page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+                    return;
+                }
+            } catch (RuntimeException navigating) {
+                // the post is committing
+            }
+        }
+        throw new AssertionError("add-user form did not come back from the server within 60s");
+    }
+
+    /** The "The password must have at least …" policy text on the add-user form, or "" when no policy. */
+    public String passwordPolicyText() {
+        Object text = page.evaluate("""
+                () => {
+                  for (const el of document.querySelectorAll('#region-main .fitem, #region-main .form-group')) {
+                    const t = (el.innerText || '').trim();
+                    if (/password must have/i.test(t)) return t;
+                  }
+                  return '';
+                }
+                """);
+        return text == null ? "" : String.valueOf(text).trim();
+    }
+
     /** After a successful create, Moodle leaves the form (goes to the user's profile/preferences). */
     public boolean leftTheForm() {
         return !page.url().contains("editadvanced.php");
@@ -88,12 +219,38 @@ public class AdminUsers extends BasePage {
      * unrelated account, which callers treat as "the uploaded user exists" (and cleanup would delete).
      */
     public String findUserIdByEmail(String email) {
+        BROWSE_USERS_FILTER_LOCK.lock();
+        BROWSE_USERS_FILTER_CROSS.lock(15, TimeUnit.MINUTES);
+        try {
+            AssertionError filterFailure = null;
+            for (int round = 1; round <= 4; round++) {
+                try {
+                    return findUserIdByEmailFiltered(email);
+                } catch (AssertionError e) {
+                    filterFailure = e;
+                    if (round < 4 && String.valueOf(e.getMessage()).contains("Browse users filter did not apply")) {
+                        System.out.println("[AdminUsers] email filter retry " + round + " for " + email);
+                        page.waitForTimeout(1_500);
+                        continue;
+                    }
+                    throw e;
+                }
+            }
+            if (filterFailure != null) throw filterFailure;
+            return null;
+        } finally {
+            BROWSE_USERS_FILTER_CROSS.unlock();
+            BROWSE_USERS_FILTER_LOCK.unlock();
+        }
+    }
+
+    private String findUserIdByEmailFiltered(String email) {
         openUserList();
         waitForUserTable(30_000);
         resetUserListFilters();
         boolean applied = applyReportBuilderTextFilter("user:email", "3", email);   // Is equal to
         if (!applied) applyLegacyEmailFilter(email);
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 12; i++) {
             String id = userIdFromRowContaining(email);
             if (id != null) return id;
             page.waitForTimeout(1_000);
@@ -109,124 +266,45 @@ public class AdminUsers extends BasePage {
     }
 
     /**
-     * Exact-email id lookup, preferring Bulk user actions' legacy filter form over the Browse users
-     * report-builder table.
-     *
-     * The report-builder table applies its filters over AJAX and keeps them in the user's session, so
-     * a lookup can silently read an unfiltered (paged) table and report a freshly created account as
-     * missing. The bulk form is a plain POST whose "Available" list carries the user id in each option
-     * value, which makes both the hit and the miss trustworthy.
+     * Exact-email id lookup via the Browse users filter (one filtered read per account).
      *
      * @return the user id, or null when the account really is absent
      */
     public String lookupUserIdByEmail(String email) {
-        for (int attempt = 1; attempt <= 2; attempt++) {
-            String viaBulk = userIdViaBulkFilter(email);
-            if (viaBulk != null) return viaBulk.isEmpty() ? null : viaBulk;
-            System.out.println("[AdminUsers] bulk email filter unusable for " + email
-                    + " (attempt " + attempt + ")");
-        }
         return findUserIdByEmail(email);
-    }
-
-    /** @return the id, "" when the applied filter proves the account is absent, null when unusable */
-    private String userIdViaBulkFilter(String email) {
-        openBulkUserActions();
-        if (clickFirstVisible("input[name='removeall'], input[value='Remove all filters']")) {
-            try {
-                page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED,
-                        new Page.WaitForLoadStateOptions().setTimeout(20_000));
-            } catch (RuntimeException ignored) {
-                // the filter form is server-rendered; the wait below covers a slow reload
-            }
-            page.waitForTimeout(800);
-        }
-        Object applied = page.evaluate("""
-                (email) => {
-                  const field = document.querySelector("#id_email, input[name='email']");
-                  if (!field) return 'no-field';
-                  const operator = document.querySelector("#id_email_op, select[name='email_op']");
-                  if (operator) {
-                    operator.value = '2';                     // is equal to
-                    operator.dispatchEvent(new Event('change', {bubbles: true}));
-                  }
-                  field.value = email;
-                  field.dispatchEvent(new Event('input', {bubbles: true}));
-                  field.dispatchEvent(new Event('change', {bubbles: true}));
-                  const add = document.querySelector("#id_addfilter, input[name='addfilter']");
-                  if (!add) return 'no-apply';
-                  add.click();
-                  return 'ok';
-                }
-                """, email);
-        if (!"ok".equals(String.valueOf(applied))) return null;
-        page.waitForTimeout(1_500);
-        try {
-            page.locator("#addselect").first().waitFor(new Locator.WaitForOptions()
-                    .setState(WaitForSelectorState.ATTACHED).setTimeout(20_000));
-        } catch (RuntimeException notRendered) {
-            return null;
-        }
-        // Legacy user_filtering echoes each active filter with its value ("Email address is equal to
-        // x@y"), which is the proof that the Available list below really is the filtered set. Option
-        // labels follow the site's user identity fields and need not show the email, so the id is read
-        // from the list rather than matched on text.
-        String bodyText = "";
-        try {
-            bodyText = page.locator("body").innerText().toLowerCase();
-        } catch (RuntimeException ignored) {
-            return null;
-        }
-        boolean filterLive = page.locator("input[name='removeall'], input[value='Remove all filters']").count() > 0
-                && bodyText.contains(email.toLowerCase());
-        if (!filterLive) return null;
-        Object result = page.evaluate("""
-                (email) => {
-                  const wanted = String(email).trim().toLowerCase();
-                  const available = document.querySelector('#addselect');
-                  if (!available) return 'no-list';
-                  for (const option of available.querySelectorAll('option')) {
-                    if (/^\\d+$/.test(option.value || '')) return option.value;
-                  }
-                  // The "selected for bulk action" list is session state and is never filtered, so it
-                  // only ever confirms a hit — and only when the label carries the email.
-                  const selected = document.querySelector('#removeselect');
-                  for (const option of selected ? selected.querySelectorAll('option') : []) {
-                    const text = (option.textContent || '').toLowerCase();
-                    if (text.includes(wanted) && /^\\d+$/.test(option.value || '')) return option.value;
-                  }
-                  return '';
-                }
-                """, email);
-        String value = result == null ? "" : String.valueOf(result).trim();
-        if ("no-list".equals(value)) return null;
-        return value;
     }
 
     /** Clear every report-builder filter ("Reset all") plus any legacy user_filtering filters. */
     public void resetUserListFilters() {
-        openFiltersPanel();
-        Object reset = page.evaluate("""
-                () => {
-                  const button = document.querySelector("input[name='resetfilters']");
-                  if (!button) return 'no-button';
-                  button.click();
-                  return 'ok';
+        for (int round = 0; round < 3; round++) {
+            openFiltersPanel();
+            Object reset = page.evaluate("""
+                    () => {
+                      const button = document.querySelector("input[name='resetfilters']");
+                      if (!button) return 'no-button';
+                      button.click();
+                      return 'ok';
+                    }
+                    """);
+            if ("ok".equals(String.valueOf(reset))) {
+                page.waitForTimeout(1_500);
+                waitForUserTable(20_000);
+                for (int i = 0; i < 8 && filtersApplied(); i++) {
+                    page.waitForTimeout(500);
                 }
-                """);
-        if ("ok".equals(String.valueOf(reset))) {
-            page.waitForTimeout(1_500);
-            waitForUserTable(20_000);
-            // A surviving filter count would later be mistaken for "my filter applied", so say so.
-            for (int i = 0; i < 6 && filtersApplied(); i++) {
-                page.waitForTimeout(500);
+                if (!filtersApplied()) return;
+                System.out.println("[AdminUsers] Reset all left filters active: " + filterButtonLabel()
+                        + " (retry " + (round + 1) + ")");
+                openUserList();
+                continue;
             }
-            if (filtersApplied()) {
-                System.out.println("[AdminUsers] Reset all left filters active: " + filterButtonLabel());
+            if (clickFirstVisible("#id_removeall, input[name='removeall'], input[value='Remove all filters']")) {
+                page.waitForTimeout(1_200);
+                waitForUserTable(15_000);
+                if (!filtersApplied()) return;
             }
-            return;
+            openUserList();
         }
-        clickFirstVisible("#id_removeall, input[name='removeall'], input[value='Remove all filters']");
     }
 
     /** The Filters dropdown holds the filter form; open it so Moodle initialises the fields. */
@@ -275,21 +353,29 @@ public class AdminUsers extends BasePage {
 
     /** Id from the first listing row whose text contains {@code needle}, or null. */
     private String userIdFromRowContaining(String needle) {
-        Object id = page.evaluate("""
-                (needle) => {
-                  const wanted = String(needle).trim().toLowerCase();
-                  for (const row of document.querySelectorAll('table tbody tr')) {
-                    if (!(row.innerText || '').toLowerCase().includes(wanted)) continue;
-                    for (const link of row.querySelectorAll('a[href*="id="]')) {
-                      const found = (link.getAttribute('href') || '').match(/[?&]id=(\\d+)/);
-                      if (found) return found[1];
-                    }
-                  }
-                  return '';
-                }
-                """, needle);
-        String value = id == null ? "" : String.valueOf(id).trim();
-        return value.isEmpty() ? null : value;
+        for (int attempt = 0; attempt < 6; attempt++) {
+            try {
+                Object id = page.evaluate("""
+                        (needle) => {
+                          const wanted = String(needle).trim().toLowerCase();
+                          for (const row of document.querySelectorAll('table tbody tr')) {
+                            if (!(row.innerText || '').toLowerCase().includes(wanted)) continue;
+                            for (const link of row.querySelectorAll('a[href*="id="]')) {
+                              const found = (link.getAttribute('href') || '').match(/[?&]id=(\\d+)/);
+                              if (found) return found[1];
+                            }
+                          }
+                          return '';
+                        }
+                        """, needle);
+                String value = id == null ? "" : String.valueOf(id).trim();
+                return value.isEmpty() ? null : value;
+            } catch (RuntimeException e) {
+                if (attempt == 5) throw e;
+                page.waitForTimeout(400);
+            }
+        }
+        return null;
     }
 
     private void waitForUserTable(int timeoutMs) {
@@ -331,18 +417,25 @@ public class AdminUsers extends BasePage {
      * does not filter deterministically.
      */
     public boolean userProfilePresent(String userId) {
-        navigate("/user/profile.php?id=" + userId);
-        page.waitForTimeout(1_200);
-        String body = page.locator("body").innerText().toLowerCase();
-        boolean error = page.locator(".alert-danger, .errorbox, .notifyproblem").count() > 0
-                || body.contains("can not find")
-                || body.contains("cannot find")
-                || body.contains("invalid user")
-                || body.contains("deleted")
-                || body.contains("nopermissions");
-        if (error) return false;
-        boolean profile = page.locator("#page-user-profile, .userprofile, .profile_tree, [data-region='profile']").count() > 0;
-        return profile;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            try {
+                navigate("/user/profile.php?id=" + userId);
+                page.waitForTimeout(1_200);
+                String body = page.locator("body").innerText().toLowerCase();
+                boolean error = safeCount(".alert-danger, .errorbox, .notifyproblem") > 0
+                        || body.contains("can not find")
+                        || body.contains("cannot find")
+                        || body.contains("invalid user")
+                        || body.contains("deleted")
+                        || body.contains("nopermissions");
+                if (error) return false;
+                return safeCount("#page-user-profile, .userprofile, .profile_tree, [data-region='profile']") > 0;
+            } catch (RuntimeException e) {
+                if (attempt == 3) throw e;
+                page.waitForTimeout(800);
+            }
+        }
+        return false;
     }
 
     private void expandUserEditForm() {
@@ -433,39 +526,74 @@ public class AdminUsers extends BasePage {
      * (The table has no Suspended column — the Suspended filter is how the list "flags" them.)
      */
     public boolean userAppearsWhenFilteredSuspendedYes(String username) {
+        for (int attempt = 0; attempt < 8; attempt++) {
+            if (tryUserAppearsWhenFilteredSuspendedYes(username)) return true;
+            page.waitForTimeout(2_000);
+        }
+        return tryUserAppearsWhenFilteredSuspendedYes(username);
+    }
+
+    private boolean tryUserAppearsWhenFilteredSuspendedYes(String username) {
         openUserList();
         waitForUserTable(30_000);
         resetUserListFilters();
-        openFiltersPanel();
-        Object applied = page.evaluate("""
-                (username) => {
-                  const suspended = document.querySelector("select[name='user:suspended_operator']");
-                  const operator = document.querySelector("select[name='user:username_operator']");
-                  const input = document.querySelector("input[name='user:username_value']");
-                  if (!suspended || !operator || !input) return 'no-field';
-                  suspended.value = '1';                       // Yes
-                  suspended.dispatchEvent(new Event('change', {bubbles: true}));
-                  operator.value = '3';                        // Is equal to
-                  operator.dispatchEvent(new Event('change', {bubbles: true}));
-                  input.removeAttribute('disabled');
-                  input.disabled = false;
-                  input.value = username;
-                  input.dispatchEvent(new Event('input', {bubbles: true}));
-                  input.dispatchEvent(new Event('change', {bubbles: true}));
-                  const form = operator.closest('form');
-                  const apply = form && form.querySelector("input[name='submitbutton']");
-                  if (!apply) return 'no-apply';
-                  apply.click();
-                  return 'ok';
-                }
-                """, username);
-        if (!"ok".equals(String.valueOf(applied))) return false;
-        page.waitForTimeout(2_500);
-        waitForUserTable(20_000);
-        Locator row = page.locator("table tbody tr").filter(new Locator.FilterOptions().setHasText(username));
-        if (row.count() > 0) return true;
-        String emailGuess = username.contains("@") ? username : username + "@example.com";
-        return page.locator("table tbody tr").filter(new Locator.FilterOptions().setHasText(emailGuess)).count() > 0;
+        if (!applySuspendedYesAndUsernameFilter(username)) return false;
+        for (int i = 0; i < 12; i++) {
+            if (rowContainsUsername(username)) return true;
+            page.waitForTimeout(500);
+        }
+        return rowContainsUsername(username);
+    }
+
+    /** Report-builder: Suspended = Yes and Username is equal to {@code username}. */
+    private boolean applySuspendedYesAndUsernameFilter(String username) {
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            openFiltersPanel();
+            Object applied = page.evaluate("""
+                    (username) => {
+                      const suspendedOp = document.querySelector("select[name='user:suspended_operator']");
+                      const suspendedVal = document.querySelector(
+                          "select[name='user:suspended_value'], input[name='user:suspended_value']");
+                      const operator = document.querySelector("select[name='user:username_operator']");
+                      const input = document.querySelector("input[name='user:username_value']");
+                      if (!suspendedOp || !operator || !input) return 'no-field';
+                      if (suspendedVal) {
+                        suspendedOp.value = '3';
+                        suspendedOp.dispatchEvent(new Event('change', {bubbles: true}));
+                        suspendedVal.removeAttribute('disabled');
+                        suspendedVal.disabled = false;
+                        suspendedVal.value = '1';
+                        suspendedVal.dispatchEvent(new Event('change', {bubbles: true}));
+                      } else {
+                        suspendedOp.value = '1';
+                        suspendedOp.dispatchEvent(new Event('change', {bubbles: true}));
+                      }
+                      operator.value = '3';
+                      operator.dispatchEvent(new Event('change', {bubbles: true}));
+                      input.removeAttribute('disabled');
+                      input.disabled = false;
+                      input.value = username;
+                      input.dispatchEvent(new Event('input', {bubbles: true}));
+                      input.dispatchEvent(new Event('change', {bubbles: true}));
+                      const form = operator.closest('form');
+                      const apply = form && form.querySelector("input[name='submitbutton']");
+                      if (!apply) return 'no-apply';
+                      apply.click();
+                      return 'ok';
+                    }
+                    """, username);
+            if (!"ok".equals(String.valueOf(applied))) {
+                page.waitForTimeout(800);
+                continue;
+            }
+            page.waitForTimeout(2_500);
+            waitForUserTable(20_000);
+            for (int i = 0; i < 10; i++) {
+                if (filtersApplied()) return true;
+                page.waitForTimeout(400);
+            }
+        }
+        return false;
     }
 
     /** Change a user's email via the edit form and save. */
@@ -492,24 +620,36 @@ public class AdminUsers extends BasePage {
     }
 
     /** Delete a user via the admin UI confirmation page (/user/delete.php). */
-    public void deleteUserViaUi(String userId) {
+    /**
+     * Delete through the admin UI: Browse users' delete link ({@code admin/user.php?delete=}) and its
+     * "Delete" confirmation.
+     *
+     * @return true when the confirmation was found and submitted
+     */
+    public boolean deleteUserViaUi(String userId) {
+        navigate("/admin/user.php");
         Object sk = page.evaluate("() => (window.M && M.cfg && M.cfg.sesskey) || ''");
-        navigate("/user/delete.php?id=" + userId + "&sesskey=" + sk);
-        page.waitForTimeout(1_000);
-        Locator confirm = page.locator("#notice button:has-text('Delete'), #notice input[value='Delete'], "
-                + "#notice button:has-text('Yes'), #notice input[value='Yes'], "
-                + "#region-main button:has-text('Delete'), #region-main input[value='Delete'], "
-                + "#region-main button:has-text('Continue'), input[value='Continue']");
-        for (int i = 0; i < confirm.count(); i++) {
-            try {
-                if (confirm.nth(i).isVisible()) {
-                    confirm.nth(i).click();
-                    page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
-                    page.waitForTimeout(1_500);
-                    return;
-                }
-            } catch (RuntimeException ignored) {}
+        for (String path : java.util.List.of(
+                "/admin/user.php?delete=" + userId + "&sesskey=" + sk,
+                "/user/delete.php?id=" + userId + "&sesskey=" + sk)) {
+            navigate(path);
+            page.waitForTimeout(1_000);
+            Locator confirm = page.locator("#notice button:has-text('Delete'), #notice input[value='Delete'], "
+                    + "#notice button:has-text('Yes'), #notice input[value='Yes'], "
+                    + "#region-main button:has-text('Delete'), #region-main input[value='Delete']");
+            for (int i = 0; i < confirm.count(); i++) {
+                try {
+                    if (confirm.nth(i).isVisible()) {
+                        System.out.println("[AdminUsers] UI delete of user " + userId + " confirmed at " + page.url());
+                        submitAndAwaitNewPage(confirm.nth(i));
+                        page.waitForTimeout(1_000);
+                        return true;
+                    }
+                } catch (RuntimeException ignored) {}
+            }
         }
+        System.out.println("[AdminUsers] no delete confirmation for user " + userId + " (url=" + page.url() + ")");
+        return false;
     }
 
     // ---- cohorts (/cohort) ----
@@ -519,7 +659,7 @@ public class AdminUsers extends BasePage {
                 .setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
         page.locator("#id_name").fill(name);
         page.locator("#id_idnumber").fill(idnumber);
-        page.locator("#id_submitbutton").click();
+        submitAndAwaitNewPage(page.locator("#id_submitbutton"));
         page.waitForTimeout(1_500);
     }
 
@@ -535,8 +675,7 @@ public class AdminUsers extends BasePage {
         page.locator("#id_name").waitFor();
         page.locator("#id_name").fill(name);
         if (idnumber != null && page.locator("#id_idnumber").count() > 0) page.locator("#id_idnumber").fill(idnumber);
-        page.locator("#id_submitbutton").click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(page.locator("#id_submitbutton"));
         page.waitForTimeout(1_500);
         return !page.url().contains("edit.php");
     }
@@ -590,11 +729,31 @@ public class AdminUsers extends BasePage {
     }
 
     public boolean cohortAddMember(String cohortId, String username) {
-        return cohortMoveMember(cohortId, username, true);
+        return cohortAddMember(cohortId, username, null);
+    }
+
+    public boolean cohortAddMember(String cohortId, String username, String email) {
+        for (String term : new String[] {username, email, username + "@example.com"}) {
+            if (term == null || term.isBlank()) continue;
+            if (tryCohortMoveMember(cohortId, term, true)) {
+                for (int i = 0; i < 12; i++) {
+                    if (cohortHasMember(cohortId, username)) return true;
+                    page.waitForTimeout(1_000);
+                }
+            }
+        }
+        return false;
     }
 
     public boolean cohortRemoveMember(String cohortId, String username) {
-        return cohortMoveMember(cohortId, username, false);
+        if (!tryCohortMoveMember(cohortId, username, false)) {
+            tryCohortMoveMember(cohortId, username + "@example.com", false);
+        }
+        for (int i = 0; i < 12; i++) {
+            if (!cohortHasMember(cohortId, username)) return true;
+            page.waitForTimeout(1_000);
+        }
+        return !cohortHasMember(cohortId, username);
     }
 
     public boolean cohortHasMember(String cohortId, String username) {
@@ -608,7 +767,7 @@ public class AdminUsers extends BasePage {
                 .waitFor(new Locator.WaitForOptions().setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
     }
 
-    private boolean cohortMoveMember(String cohortId, String username, boolean add) {
+    private boolean tryCohortMoveMember(String cohortId, String searchTerm, boolean add) {
         openCohortAssign(cohortId);
         String searchSel = add ? "#addselect_searchtext" : "#removeselect_searchtext";
         String listSel = add ? "#addselect" : "#removeselect";
@@ -617,25 +776,46 @@ public class AdminUsers extends BasePage {
         if (search.count() > 0) {
             search.first().click();
             search.first().fill("");
-            search.first().pressSequentially(username, new Locator.PressSequentiallyOptions().setDelay(40));
-            page.waitForTimeout(2_000);
+            search.first().fill(searchTerm);
+            page.evaluate("""
+                    () => {
+                      const el = document.querySelector('#addselect_searchtext, #removeselect_searchtext');
+                      if (!el) return;
+                      el.dispatchEvent(new Event('input', {bubbles: true}));
+                      el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true}));
+                    }
+                    """);
         }
         Locator list = page.locator(listSel);
-        if (list.count() == 0) return false;
-        Locator opt = list.locator("option").filter(new Locator.FilterOptions().setHasText(username));
-        if (opt.count() == 0) {
-            // user selector labels are often "First Last (email)" — retry on lastname/email fragment
-            opt = list.locator("option").filter(new Locator.FilterOptions().setHasText("Auto"));
-        }
-        if (opt.count() == 0) return false;
-        String value = opt.first().getAttribute("value");
-        if (value != null && !value.isBlank()) list.selectOption(value);
-        else opt.first().click();
         Locator btn = page.locator(btnSel);
-        if (btn.count() == 0) return false;
-        btn.first().click();
-        page.waitForTimeout(1_500);
-        return true;
+        if (list.count() == 0 || btn.count() == 0) return false;
+        String needle = searchTerm.toLowerCase(java.util.Locale.ROOT);
+        long deadline = System.currentTimeMillis() + 45_000;
+        while (System.currentTimeMillis() < deadline) {
+            Locator opts = list.locator("option:not([disabled])");
+            int n = opts.count();
+            for (int i = 0; i < n; i++) {
+                Locator opt = opts.nth(i);
+                try {
+                    String text = opt.innerText().toLowerCase(java.util.Locale.ROOT);
+                    String value = opt.getAttribute("value");
+                    if (value == null || value.isBlank() || "0".equals(value)) continue;
+                    if (!text.contains(needle)) continue;
+                    if (value != null && !value.isBlank()) list.selectOption(value);
+                    else opt.click();
+                    page.waitForTimeout(400);
+                    if (btn.first().isEnabled()) {
+                        clickSlowSubmit(btn.first());
+                        page.waitForTimeout(1_500);
+                        return true;
+                    }
+                } catch (RuntimeException ignored) {
+                    // AJAX refresh can replace the list mid-loop
+                }
+            }
+            page.waitForTimeout(600);
+        }
+        return false;
     }
 
     private boolean selectorHasUser(String selectCss, String username) {
@@ -667,7 +847,7 @@ public class AdminUsers extends BasePage {
      * timeout here reports every account as missing.
      */
     private boolean applyReportBuilderTextFilter(String fieldPrefix, String operatorValue, String value) {
-        for (int attempt = 1; attempt <= 3; attempt++) {
+        for (int attempt = 1; attempt <= 5; attempt++) {
             if (submitReportBuilderTextFilter(fieldPrefix, operatorValue, value)) return true;
             System.out.println("[AdminUsers] filter " + fieldPrefix + " did not stick (attempt "
                     + attempt + ", button reads '" + filterButtonLabel() + "')");
@@ -709,14 +889,25 @@ public class AdminUsers extends BasePage {
         }
         page.waitForTimeout(2_500);
         waitForUserTable(20_000);
+        for (int i = 0; i < 20; i++) {
+            if (filtersApplied()) return true;
+            page.waitForTimeout(400);
+        }
         return filtersApplied();
     }
 
     public boolean userAppearsInFilteredList(String username) {
-        filterUserList(username);
+        for (int attempt = 0; attempt < 8; attempt++) {
+            filterUserList(username);
+            if (rowContainsUsername(username)) return true;
+            page.waitForTimeout(1_500);
+        }
+        return rowContainsUsername(username);
+    }
+
+    private boolean rowContainsUsername(String username) {
         Locator row = page.locator("table tbody tr").filter(new Locator.FilterOptions().setHasText(username));
         if (row.count() > 0) return true;
-        // Email column usually embeds the username (autotest_N@example.com)
         String emailGuess = username.contains("@") ? username : username + "@example.com";
         row = page.locator("table tbody tr").filter(new Locator.FilterOptions().setHasText(emailGuess));
         return row.count() > 0;
@@ -742,27 +933,33 @@ public class AdminUsers extends BasePage {
      * `#id_action` sits below it.
      */
     public boolean bulkUserActionsReady(int timeoutMs) {
-        try {
-            page.locator("#id_susers, select[name='susers[]']").first().waitFor(new Locator.WaitForOptions()
-                    .setState(WaitForSelectorState.ATTACHED).setTimeout(timeoutMs));
-            return true;
-        } catch (RuntimeException notRendered) {
-            return false;
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                page.locator("#addselect, #removeselect, #id_susers, select[name='susers[]']").first()
+                        .waitFor(new Locator.WaitForOptions()
+                                .setState(WaitForSelectorState.ATTACHED).setTimeout(5_000));
+                return true;
+            } catch (RuntimeException notRendered) {
+                page.waitForTimeout(500);
+            }
         }
+        return false;
     }
 
     /** Labels of the users in the Selected box, excluding its "All selected (n/m)" header entry. */
     public String bulkSelectedUsersText() {
+        String css = bulkUsesLegacyDualList() ? "#removeselect" : "#id_susers";
         Object text = page.evaluate("""
-                () => {
-                  const box = document.querySelector("#id_susers, select[name='susers[]']");
+                (sel) => {
+                  const box = document.querySelector(sel);
                   if (!box) return '';
                   return Array.from(box.querySelectorAll('option'))
                           .filter(option => /^\\d+$/.test(option.value || '') && option.value !== '0')
                           .map(option => (option.textContent || '').trim())
                           .join(' | ');
                 }
-                """);
+                """, css);
         return String.valueOf(text);
     }
 
@@ -907,6 +1104,268 @@ public class AdminUsers extends BasePage {
         page.waitForTimeout(1_500);
         clickDeleteConfirm();
         return true;
+    }
+
+    /**
+     * Make Bulk user actions' Selected list hold these accounts (id -> email). Uses the same
+     * {@code #addselect} / {@code #removeselect} controls as {@link #bulkActionOnEmailContains}.
+     *
+     * @return user ids now in the Selected list
+     */
+    public java.util.List<String> bulkSelectExactly(java.util.Map<Long, String> idToEmail) {
+        openBulkUserActions();
+        clearLegacyUserFilters();
+        page.waitForTimeout(800);
+        bulkClearSelectedUsers();
+        java.util.Set<String> wanted = new java.util.LinkedHashSet<>();
+        for (java.util.Map.Entry<Long, String> account : idToEmail.entrySet()) {
+            String id = String.valueOf(account.getKey());
+            wanted.add(id);
+            bulkAddUserToSelection(account.getValue(), id);
+            if (!bulkSelectedIds().contains(id)) {
+                System.out.println("[AdminUsers] bulk: could not add user " + id + " ("
+                        + account.getValue() + ") — available=" + bulkAvailableIds()
+                        + " selected=" + bulkSelectedIds());
+            }
+        }
+        bulkDropSelectedExcept(wanted);
+        java.util.List<String> selected = bulkSelectedIds();
+        System.out.println("[AdminUsers] bulk Selected ids=" + selected + " (wanted " + wanted + ")");
+        return selected;
+    }
+
+    private boolean bulkUsesLegacyDualList() {
+        return safeCount("#addselect") > 0;
+    }
+
+    private java.util.List<String> bulkAvailableIds() {
+        if (bulkUsesLegacyDualList()) {
+            return bulkListIdsIn("#addselect");
+        }
+        return bulkListIdsIn("#id_ausers", "select[name='ausers[]']");
+    }
+
+    private java.util.List<String> bulkSelectedIds() {
+        if (bulkUsesLegacyDualList()) {
+            return bulkListIdsIn("#removeselect");
+        }
+        return bulkListIdsIn("#id_susers", "select[name='susers[]']");
+    }
+
+    private void bulkClearSelectedUsers() {
+        bulkDropSelectedExcept(java.util.Set.of());
+    }
+
+    /** Move accounts out of Selected when they are not in {@code keepIds} (empty = clear all). */
+    private void bulkDropSelectedExcept(java.util.Set<String> keepIds) {
+        for (int attempt = 0; attempt < 12; attempt++) {
+            java.util.List<String> stray = bulkSelectedIds().stream()
+                    .filter(id -> !keepIds.contains(id))
+                    .toList();
+            if (stray.isEmpty()) return;
+            bulkMoveFromSelectedToAvailable(stray);
+        }
+        java.util.List<String> left = bulkSelectedIds().stream()
+                .filter(id -> !keepIds.contains(id))
+                .toList();
+        if (!left.isEmpty()) {
+            System.out.println("[AdminUsers] bulk: could not deselect stale ids " + left
+                    + " (session Selected=" + bulkSelectedIds() + ")");
+        }
+    }
+
+    private void bulkMoveFromSelectedToAvailable(java.util.List<String> userIds) {
+        if (userIds.isEmpty()) return;
+        if (bulkUsesLegacyDualList()) {
+            page.evaluate("""
+                    (ids) => {
+                      const box = document.querySelector('#removeselect');
+                      if (!box) return;
+                      for (const o of box.options) {
+                        o.selected = ids.includes(o.value);
+                      }
+                    }
+                    """, userIds);
+            Locator remove = page.locator("input[name='remove'], #remove");
+            if (remove.count() > 0) {
+                clickSlowSubmit(remove.first());
+                page.waitForTimeout(900);
+            }
+            return;
+        }
+        moveBulkOptions("#id_susers", userIds, "removesel");
+    }
+
+    /**
+     * Move one account from Available to Selected. Clears the email filter before each user so an
+     * earlier filter does not empty Available for the next row.
+     */
+    private void bulkAddUserToSelection(String email, String expectedUserId) {
+        if (bulkSelectedIds().contains(expectedUserId)) return;
+        Locator showMore = page.locator("a:has-text('Show more'), button:has-text('Show more')");
+        if (showMore.count() > 0) {
+            try {
+                if (showMore.first().isVisible()) showMore.first().click();
+            } catch (RuntimeException ignored) {}
+            page.waitForTimeout(400);
+        }
+        if (bulkMoveFromAvailableToSelected(expectedUserId, email)) {
+            waitBulkSelectedContains(expectedUserId, 5_000);
+            return;
+        }
+        filterBulkByEmail(email);
+        page.waitForTimeout(1_000);
+        if (bulkMoveFromAvailableToSelected(expectedUserId, email)) {
+            waitBulkSelectedContains(expectedUserId, 5_000);
+        }
+    }
+
+    private boolean bulkMoveFromAvailableToSelected(String expectedUserId, String email) {
+        if (bulkSelectedIds().contains(expectedUserId)) return true;
+        if (bulkUsesLegacyDualList()) {
+            Locator opts = page.locator("#addselect option:not([disabled])");
+            String needle = email.toLowerCase(java.util.Locale.ROOT);
+            for (int i = 0; i < opts.count(); i++) {
+                try {
+                    String value = opts.nth(i).getAttribute("value");
+                    String text = opts.nth(i).innerText().toLowerCase(java.util.Locale.ROOT);
+                    if (!expectedUserId.equals(value) && !text.contains(needle)) continue;
+                    if (value != null && !value.isBlank()) {
+                        page.locator("#addselect").selectOption(value);
+                    } else {
+                        opts.nth(i).click();
+                    }
+                    Locator add = page.locator("input[name='add'], #add");
+                    if (add.count() > 0) clickSlowSubmit(add.first());
+                    return true;
+                } catch (RuntimeException ignored) {}
+            }
+            return false;
+        }
+        if (bulkAvailableIds().contains(expectedUserId)) {
+            moveBulkOptions("#id_ausers", java.util.List.of(expectedUserId), "addsel");
+            return true;
+        }
+        return false;
+    }
+
+    private void waitBulkSelectedContains(String expectedUserId, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (bulkSelectedIds().contains(expectedUserId)) return;
+            page.waitForTimeout(300);
+        }
+    }
+
+    @SafeVarargs
+    private java.util.List<String> bulkListIdsIn(String... selectors) {
+        for (String css : selectors) {
+            java.util.List<String> ids = bulkListIdsInOne(css);
+            if (!ids.isEmpty() || safeCount(css) > 0) return ids;
+        }
+        return java.util.List.of();
+    }
+
+    private java.util.List<String> bulkListIdsInOne(String css) {
+        try {
+            Object ids = page.evaluate("""
+                    (sel) => {
+                      const box = document.querySelector(sel);
+                      if (!box) return [];
+                      return Array.from(box.querySelectorAll('option'))
+                          .map(o => o.value || '')
+                          .filter(v => /^\\d+$/.test(v) && v !== '0');
+                    }
+                    """, css);
+            java.util.List<String> out = new java.util.ArrayList<>();
+            if (ids instanceof java.util.List<?> list) {
+                for (Object v : list) out.add(String.valueOf(v));
+            }
+            return out;
+        } catch (RuntimeException navigating) {
+            return java.util.List.of();
+        }
+    }
+
+    /**
+     * Choose {@code label} in the bulk action menu, press Go and confirm with Yes/Continue.
+     *
+     * @return null on success, otherwise why the action could not be applied
+     */
+    public String applyBulkAction(String label) {
+        if (!chooseBulkAction(label)) {
+            return "no '" + label + "' bulk action (offered: " + bulkActionLabels() + ")";
+        }
+        String go = "#id_doaction, input[name='doaction'], button[name='doaction']";
+        if (safeCount(go) > 0) clickSlowSubmit(page.locator(go).first());
+        page.waitForTimeout(1_000);
+        Locator confirm = page.locator("#region-main button:has-text('Yes'), "
+                + "#region-main input[type='submit'][value='Yes'], #notice button:has-text('Yes'), "
+                + "#region-main button:has-text('Continue'), #region-main input[type='submit'][value='Continue']");
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                int n;
+                try {
+                    n = confirm.count();
+                } catch (RuntimeException destroyed) {
+                    n = 0;
+                }
+                for (int i = 0; i < n; i++) {
+                    Locator candidate = confirm.nth(i);
+                    if (candidate.isVisible()) {
+                        System.out.println("[AdminUsers] bulk '" + label + "' confirm at " + page.url());
+                        submitAndAwaitNewPage(candidate);
+                        return null;
+                    }
+                }
+            } catch (RuntimeException navigating) {
+                // the Go post is still committing
+            }
+            page.waitForTimeout(500);
+        }
+        return "no confirmation page after choosing '" + label + "' (url=" + page.url() + ")";
+    }
+
+    private void moveBulkOptions(String selectCss, java.util.List<String> ids, String buttonName) {
+        page.evaluate("""
+                ([css, ids]) => {
+                  const box = document.querySelector(css);
+                  if (!box) return;
+                  for (const o of box.options) o.selected = ids.includes(o.value);
+                }
+                """, java.util.List.of(selectCss, ids));
+        clickSlowSubmit(page.locator("input[name='" + buttonName + "'], button[name='" + buttonName + "']").first());
+        page.waitForTimeout(500);
+    }
+
+    private void filterBulkByEmail(String email) {
+        Locator emailField = page.locator("#id_email, input[name='email']");
+        if (emailField.count() == 0) return;
+        try {
+            emailField.first().fill(email);
+        } catch (RuntimeException e) {
+            emailField.first().evaluate("(el, v) => { el.value = v;"
+                    + " el.dispatchEvent(new Event('change', {bubbles:true})); }", email);
+        }
+        Locator addFilter = page.locator("#id_addfilter, input[name='addfilter'], button:has-text('Add filter')");
+        if (addFilter.count() > 0) {
+            clickSlowSubmit(addFilter.first());
+            page.waitForTimeout(1_000);
+        }
+    }
+
+    private String bulkActionLabels() {
+        try {
+            return String.valueOf(page.evaluate("""
+                    () => {
+                      const a = document.querySelector("#id_action, select[name='action']");
+                      return a ? Array.from(a.options).map(o => (o.textContent || '').trim()).join(' | ') : '(no menu)';
+                    }
+                    """));
+        } catch (RuntimeException e) {
+            return "(unreadable)";
+        }
     }
 
     private boolean selectAction(Locator action, String actionValue) {

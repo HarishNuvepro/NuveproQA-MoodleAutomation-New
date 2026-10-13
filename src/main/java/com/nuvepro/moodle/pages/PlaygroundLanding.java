@@ -3,7 +3,9 @@ package com.nuvepro.moodle.pages;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.assertions.PlaywrightAssertions;
-import com.microsoft.playwright.options.LoadState;
+import com.microsoft.playwright.options.WaitForSelectorState;
+import com.microsoft.playwright.options.WaitUntilState;
+import java.util.Locale;
 
 /**
  * Playground (sandbox) LANDING page — first screen of .../mod/cloudlabs/view.php?id=&lt;cmid&gt;.
@@ -22,6 +24,16 @@ public class PlaygroundLanding extends BasePage {
 
     public PlaygroundLanding(Page page) {
         super(page);
+    }
+
+    /** Single navigation + wait (no retry loop). Use when the page was just loaded or for student polling. */
+    public void openDirect(int cmid) {
+        navigate("/mod/cloudlabs/view.php?id=" + cmid);
+        page.locator(CONTAINER + ", " + START_SANDBOX + ", " + CONTINUE_LAB + ", " + DETAILS)
+                .first()
+                .waitFor(new Locator.WaitForOptions()
+                        .setState(com.microsoft.playwright.options.WaitForSelectorState.VISIBLE)
+                        .setTimeout(25_000));
     }
 
     public void open(int cmid) {
@@ -70,6 +82,26 @@ public class PlaygroundLanding extends BasePage {
 
     public boolean hasActiveLab() {
         return page.locator(CONTINUE_LAB).count() > 0;
+    }
+
+    /** Continue control visible on the landing (prefer over {@link #hasActiveLab()} for clicks). */
+    public boolean hasVisibleContinue() {
+        Locator cont = page.locator(CONTINUE_LAB);
+        try {
+            return cont.count() > 0 && cont.first().isVisible();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private PlaygroundControlPanel controlPanel() {
+        return new PlaygroundControlPanel(page);
+    }
+
+    /** Lab console on view.php (AJAX cp fragment), including deleted/loading status-only UI. */
+    private boolean labConsoleOpen() {
+        PlaygroundControlPanel cp = controlPanel();
+        return cp.isShown() || cp.isLabCpFragmentMounted();
     }
 
     public String labStatusText() {
@@ -184,6 +216,7 @@ public class PlaygroundLanding extends BasePage {
                 PlaygroundControlPanel.MASTER,
                 PlaygroundControlPanel.STOP_LAB,
                 PlaygroundControlPanel.LAUNCH_START,
+                PlaygroundControlPanel.H_LAB_STATUS,
                 "#np-ap-mod-lab-ui-schema",
                 "#subCatalogDataSubmitBtn",
                 "#np-ap-mod-lab-container-home",
@@ -201,20 +234,118 @@ public class PlaygroundLanding extends BasePage {
     }
 
     public void continueLab() {
+        clickContinueOnce();
+        page.waitForTimeout(600);
+    }
+
+    /**
+     * Landing JS attaches Continue handlers after lab-status loads; clicking too early is a no-op.
+     */
+    public void waitForContinueInteractionReady(int maxSeconds) {
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            if (labConsoleOpen()) return;
+            if (hasVisibleContinue() || hasStartSandbox()) {
+                String status = labStatusText();
+                if (!status.isEmpty() && !"-".equals(status.trim())) {
+                    page.waitForTimeout(1_500);
+                    return;
+                }
+            }
+            page.waitForTimeout(400);
+        }
+        page.waitForTimeout(4_000);
+    }
+
+    private void clickContinueOnce() {
         Locator cont = page.locator(CONTINUE_LAB);
         try {
-            cont.first().click(new Locator.ClickOptions().setForce(true));
+            cont.first().waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(8_000));
+            cont.first().scrollIntoViewIfNeeded();
+            cont.first().click();
         } catch (RuntimeException e) {
             page.evaluate("() => document.querySelector('.np-ap-pl-continue')?.click()");
         }
-        page.waitForTimeout(1_000);
         tryConfirmModal(2);
         clickVisibleConfirmFallback();
     }
 
+    private void invokeLoadPlaygroundCpFallback() {
+        page.evaluate("""
+                () => {
+                  const tryCall = (fn) => { try { fn(); return true; } catch (e) { return false; } };
+                  for (const n of ['loadPlaygroundLabcpContent', 'loadPlaygroundLabCpContent',
+                      'loadPlaygroundLabCPContent']) {
+                    const fn = window[n];
+                    if (typeof fn === 'function' && tryCall(fn)) return n;
+                  }
+                  const btn = document.querySelector('.np-ap-pl-continue:not([disabled])');
+                  if (btn) btn.click();
+                  return '';
+                }
+                """);
+    }
+
+    private void clickContinueAwaitingCpResponse() {
+        try {
+            page.waitForResponse(
+                    r -> {
+                        String u = r.url().toLowerCase(Locale.ROOT);
+                        return u.contains("cp.php")
+                                || u.contains("loadplayground")
+                                || (u.contains("cloudlabs") && "POST".equalsIgnoreCase(r.request().method()));
+                    },
+                    new Page.WaitForResponseOptions().setTimeout(25_000),
+                    this::clickContinueOnce);
+        } catch (RuntimeException e) {
+            clickContinueOnce();
+        }
+    }
+
+    /**
+     * Open the lab console via Continue (typical after admin Delete while the student still has a lab row).
+     */
+    public void openConsoleViaContinue() {
+        if (labConsoleOpen()) return;
+        if (!hasVisibleContinue() && !hasActiveLab()) {
+            throw new AssertionError("Continue lab control not shown — cannot open console (url="
+                    + page.url() + ")");
+        }
+        for (int pass = 1; pass <= 2; pass++) {
+            if (pass > 1) {
+                page.reload(new Page.ReloadOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+                page.waitForTimeout(2_000);
+            }
+            waitForContinueInteractionReady(pass == 1 ? 22 : 28);
+            int clicks = pass == 1 ? 8 : 5;
+            for (int c = 1; c <= clicks; c++) {
+                if (labConsoleOpen()) return;
+                clickContinueAwaitingCpResponse();
+                long sliceEnd = System.currentTimeMillis() + 18_000;
+                while (System.currentTimeMillis() < sliceEnd && !labConsoleOpen()) {
+                    tryConfirmModal(1);
+                    clickVisibleConfirmFallback();
+                    page.waitForTimeout(800);
+                }
+                if (labConsoleOpen()) return;
+            }
+        }
+        invokeLoadPlaygroundCpFallback();
+        long deadline = System.currentTimeMillis() + 50_000;
+        while (System.currentTimeMillis() < deadline && !labConsoleOpen()) {
+            tryConfirmModal(1);
+            page.waitForTimeout(1_000);
+        }
+        if (!labConsoleOpen()) {
+            throw new AssertionError("Continue did not open the lab console (url=" + page.url() + ")");
+        }
+    }
+
     /** Reach the control panel regardless of lab state (Start Sandbox or Continue). */
     public void openLabConsole() {
-        if (controlPanelVisible()) {
+        if (labConsoleOpen()) {
             System.out.println("[SB] lab console already open");
             return;
         }
@@ -232,24 +363,7 @@ public class PlaygroundLanding extends BasePage {
         if (hasStart) {
             startSandbox(true);
         } else if (hasContinue) {
-            continueLab();
-            long deadline = System.currentTimeMillis() + 120_000;
-            while (System.currentTimeMillis() < deadline && !controlPanelVisible()) {
-                tryConfirmModal(1);
-                clickVisibleConfirmFallback();
-                page.waitForTimeout(1_000);
-            }
-            if (!controlPanelVisible()) {
-                // Continue is AJAX (loadPlaygroundLabcpContent). One retry click.
-                continueLab();
-                long retry = System.currentTimeMillis() + 30_000;
-                while (System.currentTimeMillis() < retry && !controlPanelVisible()) {
-                    page.waitForTimeout(1_000);
-                }
-            }
-            if (!controlPanelVisible()) {
-                throw new AssertionError("Continue did not open the lab console (url=" + page.url() + ")");
-            }
+            openConsoleViaContinue();
         } else {
             throw new AssertionError("Neither 'Start Sandbox' nor 'Continue' control is present");
         }

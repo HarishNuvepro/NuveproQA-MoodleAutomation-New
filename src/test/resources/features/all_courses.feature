@@ -2,6 +2,7 @@
 # One tag per scenario — the same @ACP-Sn / @CGAP-ACP-n as All Course Page Automation_Ref.
 #   .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@ACP-S1"
 #   .\mvnw.cmd test -Pwatch "-Dcucumber.features=src/test/resources/features/all_courses.feature"
+#   .\mvnw.cmd test -Pparallel "-DsuiteXmlFile=testng-parallel5.xml" "-Dparallel.browsers=3" "-Dheadless=true" "-Dcucumber.features=src/test/resources/features/all_courses.feature"
 
 Feature: All Courses page
 

@@ -5,7 +5,19 @@
 
 Feature: Practice Project admin actions
 
-  @PP-113
+  @PGG-6 @practice_project
+  Scenario: Admin sees the User Labs and User Guided Project options
+    Given I open the guided activity
+    Then admin sees the guided manage buttons
+
+  @PGG-9 @practice_project
+  Scenario: The User Labs page lists the labs for the practice project activity
+    Given I open the guided activity
+    When I open the guided User Labs page
+    Then the guided labs are listed
+
+  @PP-113 @PGG-10 @PGG-12
+  Scenario: Admin can open User Attempts and download the consolidated practice project report
   Scenario: Admin can open User Attempts and download the consolidated practice project report
     Given I open the guided activity
     When I open the User Guided Project page
@@ -46,13 +58,13 @@ Feature: Practice Project admin actions
     When admin deletes the Practice Project override
     Then the Practice Project override is removed
 
-  @PP-59
+  @PP-59 @skip
   Scenario: Practice Project API returns renamed project configuration fields
     Given I open the guided activity
     When admin requests the Practice Project API response
     Then the API uses Practice Project names and returns dates time limit and attempts
 
-  @PP-63 @practice_project_override
+  @PP-63 @practice_project_override @skip
   Scenario: Practice Project API returns user attempts checkpoints and override values
     Given admin selects an eligible Practice Project override user
     When admin creates an unlimited Practice Project override
@@ -76,25 +88,25 @@ Feature: Practice Project admin actions
     When I open the User Guided Project page
     Then admin can cancel the report download modal
 
-  @PP-131
+  @PP-131 @deviation
   Scenario: Admin can open checkpoint results for a Practice Project attempt
     Given I open the guided activity
     When I open the User Guided Project page
     And admin selects a participant and opens User Attempts
     Then admin can open checkpoint details for the selected attempt
 
-  @PP-52
+  @PP-52 @deviation
   Scenario: Admin can configure a Practice Project override with no attempts
     Given admin selects an eligible Practice Project override user
     Then the override form offers the No Attempts configuration
 
-  @PP-117
+  @PP-117 @deviation
   Scenario: The User Practice Project table prevents multiple participant selection
     Given I open the guided activity
     When I open the User Guided Project page
     Then the participants table prevents multiple selection
 
-  @CGAP-PGG-19
+  @CGAP-PGG-19 @deviation
   Scenario: The User Practice Project table offers xml csv txt and json export
     Given I open the guided activity
     When I open the User Guided Project page

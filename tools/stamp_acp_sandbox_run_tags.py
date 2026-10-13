@@ -69,8 +69,8 @@ def sb_group(feature: str, tag: str, rows: list[int]) -> None:
 
 
 # create
-sb_group("sandbox_create.feature", "@SB-create-1", [2])
-sb_group("sandbox_create.feature", "@SB-create-9", [17])
+sb_group("sandbox.feature", "@SB-create-1", [2])
+sb_group("sandbox.feature", "@SB-create-9", [17])
 
 # user (combined leftovers remapped to the surviving feature tag)
 sb_group("sandbox_user_functionality.feature", "@SB-user-1", [7, 12, 13, 14, 25, 31, 44])
@@ -93,14 +93,14 @@ sb_group("sandbox_user_functionality.feature", "@SB-manage-31", [16, 30])
 sb_group("sandbox_user_functionality.feature", "@SB-manage-34", [32])
 
 # manage
-sb_group("sandbox_actions.feature", "@SB-manage-1", [3, 21, 38])
-sb_group("sandbox_actions.feature", "@SB-manage-3", [33])
-sb_group("sandbox_actions.feature", "@SB-manage-8", [19, 22, 34, 48])
-sb_group("sandbox_actions.feature", "@SB-manage-9", [20, 35])
-sb_group("sandbox_actions.feature", "@SB-manage-12", [24])
-sb_group("sandbox_actions.feature", "@SB-manage-15", [23])
-sb_group("sandbox_actions.feature", "@SB-manage-20", [36])
-sb_group("sandbox_actions.feature", "@SB-manage-23", [11])
+sb_group("sandbox.feature", "@SB-manage-1", [3, 21, 38])
+sb_group("sandbox.feature", "@SB-manage-3", [33])
+sb_group("sandbox.feature", "@SB-manage-8", [19, 22, 34, 48])
+sb_group("sandbox.feature", "@SB-manage-9", [20, 35])
+sb_group("sandbox.feature", "@SB-manage-12", [24])
+sb_group("sandbox.feature", "@SB-manage-15", [23])
+sb_group("sandbox.feature", "@SB-manage-20", [36])
+sb_group("sandbox.feature", "@SB-manage-23", [11])
 
 
 def apply(ws, mapping: dict[int, str]) -> int:

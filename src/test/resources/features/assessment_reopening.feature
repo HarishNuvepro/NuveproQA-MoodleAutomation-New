@@ -4,7 +4,7 @@
 
 Feature: Assessment — Assessment reopening / override
 
-  @A24
+  @A24 @mediumbatch1
   Scenario: Admin has access to reopen a completed assessment
     Given the reopen override form is open for a completed user
     Then the reopen offers a submissions control

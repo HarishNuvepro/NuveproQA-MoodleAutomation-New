@@ -74,6 +74,9 @@ public final class CloudLabsClient {
             return login();
         } catch (UnavailableException e) {
             return null;
+        } catch (RuntimeException e) {
+            System.out.println("[CloudLabs] login unavailable: " + e.getMessage());
+            return null;
         }
     }
 
@@ -93,6 +96,10 @@ public final class CloudLabsClient {
         String respBody = resp.body() == null ? "" : resp.body();
         if (resp.statusCode() == 406 || respBody.toLowerCase().contains("temporarily blocked")) {
             accountBlocked = true;
+            throw new UnavailableException("CloudLabs login failed: HTTP " + resp.statusCode()
+                    + " " + snippet(respBody));
+        }
+        if (resp.statusCode() == 401 || resp.statusCode() == 403) {
             throw new UnavailableException("CloudLabs login failed: HTTP " + resp.statusCode()
                     + " " + snippet(respBody));
         }
@@ -163,10 +170,23 @@ public final class CloudLabsClient {
             resp = post(url, "subscriptionIds=" + enc(subscriptionId), token);
         }
         String b = resp.body();
-        if (b == null) return null;
-        // [{"id":"34522","nl_action":"Create","nl_status":"Complete",...}]
-        Matcher m = Pattern.compile("\"nl_action\"\\s*:\\s*\"([^\"]*)\"\\s*,\\s*\"nl_status\"\\s*:\\s*\"([^\"]*)\"").matcher(b);
-        if (m.find()) return new SubStatus(m.group(1), m.group(2));
+        if (b == null || b.isBlank() || b.contains("[]")) {
+            return null;
+        }
+        if (subscriptionId != null && !subscriptionId.isBlank() && !b.contains(subscriptionId)) {
+            System.out.println("[CloudLabs] getStatus: id " + subscriptionId
+                    + " not in body — still parsing snippet=" + snippet(b));
+        }
+        Matcher paired = Pattern.compile(
+                "\"nl_action\"\\s*:\\s*\"([^\"]*)\"\\s*,\\s*\"nl_status\"\\s*:\\s*\"([^\"]*)\"").matcher(b);
+        if (paired.find()) {
+            return new SubStatus(paired.group(1), paired.group(2));
+        }
+        Matcher action = Pattern.compile("\"nl_action\"\\s*:\\s*\"([^\"]*)\"").matcher(b);
+        Matcher status = Pattern.compile("\"nl_status\"\\s*:\\s*\"([^\"]*)\"").matcher(b);
+        if (action.find() && status.find()) {
+            return new SubStatus(action.group(1), status.group(1));
+        }
         return null;
     }
 
@@ -271,6 +291,9 @@ public final class CloudLabsClient {
                                   int maxSeconds, int intervalSeconds, String label) {
         if (subscriptionIds == null || subscriptionIds.isEmpty()) {
             throw new IllegalArgumentException("no lab ids to wait for");
+        }
+        if (ensureToken() == null) {
+            throw new UnavailableException("CloudLabs API token not available (login failed or blocked)");
         }
         boolean deleteWait = targets.contains(com.nuvepro.moodle.pages.ManageLabs.LabState.DELETED);
         long deadline = System.currentTimeMillis() + maxSeconds * 1000L;

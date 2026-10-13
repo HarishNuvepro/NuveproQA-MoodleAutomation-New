@@ -8,6 +8,7 @@ import com.microsoft.playwright.assertions.PlaywrightAssertions;
 import com.microsoft.playwright.options.LoadState;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ManageLabs;
 import com.nuvepro.moodle.pages.PlaygroundControlPanel;
 import io.cucumber.java.en.Then;
@@ -46,7 +47,7 @@ public class PlaygroundAugmentedSteps {
 
     @Then("a student does not see the Manage Labs option")
     public void studentNoManageLabs() {
-        BrowserContext sc = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        BrowserContext sc = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         try {
             Page sp = sc.newPage();
@@ -145,14 +146,4 @@ public class PlaygroundAugmentedSteps {
                 "landing details should show the lab type");
     }
 
-    // PG-32
-    @Then("the report lists courses with lab activity columns")
-    public void reportListsCourses() {
-        Page p = ctx.page;
-        assertTrue(p.locator("#region-main, table").count() > 0, "report did not render");
-        String body = p.locator("body").innerText().toLowerCase();
-        assertTrue(body.contains("course") || body.contains("participant") || body.contains("lab")
-                        || body.contains("progress") || body.contains("report"),
-                "report should show course/lab/progress content");
-    }
 }

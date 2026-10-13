@@ -12,6 +12,7 @@ import com.nuvepro.moodle.helpers.AssessmentCreateSpec;
 import com.nuvepro.moodle.helpers.AssessmentUserRegistry;
 import com.nuvepro.moodle.helpers.Auth;
 import com.nuvepro.moodle.helpers.CloudLabsClient;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ChallengeControlPanel;
 import com.nuvepro.moodle.pages.CourseView;
 import com.nuvepro.moodle.pages.ManageLabs;
@@ -25,6 +26,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.EnumSet;
 
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 /**
@@ -135,7 +137,7 @@ public class AssessmentUserFunctionalitySteps {
         if (ctx.studentContext != null) {
             try { ctx.studentContext.close(); } catch (Throwable ignored) {}
         }
-        ctx.studentContext = GlobalHooks.browser.newContext(opts);
+        ctx.studentContext = BrowserUi.newContext(GlobalHooks.browser, opts);
         studentPage = ctx.studentContext.newPage();
         studentPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
         ctx.studentPage = studentPage;
@@ -175,8 +177,8 @@ public class AssessmentUserFunctionalitySteps {
     @Given("a student is enrolled in the created assessment course")
     public void aStudentIsEnrolledInTheCreatedAssessmentCourse() {
         if (Settings.WS_TOKEN.isEmpty()) throw new SkipException("MOODLE_WS_TOKEN not set");
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
-        courseId = Long.parseLong(Settings.COURSE_ID);
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
+        courseId = Long.parseLong(ctx.assessmentCourseId());
         sectionId = ctx.sectionId != null ? ctx.sectionId : "";
 
         student = chooseStudentForRun();
@@ -214,6 +216,36 @@ public class AssessmentUserFunctionalitySteps {
         assertTrue(studentPage.locator(ChallengeControlPanel.START_ASSESSMENT).count() > 0
                         || studentPage.locator("#region-main").innerText().contains(ctx.newActivityName),
                 "created assessment landing content is not visible for the student");
+    }
+
+    @When("the student opens Read More on the assessment landing")
+    public void theStudentOpensReadMoreOnTheAssessmentLanding() {
+        new ChallengeControlPanel(studentPage).openReadMoreOnLanding();
+    }
+
+    @Then("the Read More modal shows the full assessment description")
+    public void theReadMoreModalShowsTheFullAssessmentDescription() {
+        ChallengeControlPanel acp = new ChallengeControlPanel(studentPage);
+        String marker = ctx.lastCreateSpec != null ? ctx.lastCreateSpec.richContentMarker : null;
+        if (marker != null && !marker.isBlank()) {
+            assertTrue(acp.readMoreModalContains(marker, "Auto rich-content paragraph"),
+                    "Read More modal missing rich-content marker " + marker);
+            return;
+        }
+        Locator modal = studentPage.locator("[data-region='modal-container'].show, .modal.show, [role='dialog']");
+        assertTrue(modal.count() > 0, "Read More modal did not open");
+        String text = modal.first().innerText().trim();
+        assertTrue(text.length() > 185,
+                "Read More modal text too short for a long description (len=" + text.length() + ")");
+    }
+
+    @Then("the fresh assessment landing shows Start Assessment only without Continue")
+    public void theFreshAssessmentLandingShowsStartOnlyWithoutContinue() {
+        ChallengeControlPanel acp = new ChallengeControlPanel(studentPage);
+        assertTrue(acp.isOnLandingBeforeStart() || studentPage.locator(ChallengeControlPanel.START_ASSESSMENT).count() > 0,
+                "Start Assessment is not shown on a fresh landing");
+        assertFalse(acp.hasContinueAttemptVisible(),
+                "Continue should not appear before the student starts an attempt");
     }
 
     @Then("the created assessment instructions are visible before starting")
@@ -396,7 +428,7 @@ public class AssessmentUserFunctionalitySteps {
     @Given("admin hides the created assessment on the course page")
     public void adminHidesTheCreatedAssessmentOnTheCoursePage() {
         if (ctx.page == null) throw new SkipException("admin page is not available for hiding the activity");
-        new CourseView(ctx.page).hideActivityOnCoursePage(Settings.COURSE_ID,
+        new CourseView(ctx.page).hideActivityOnCoursePage(ctx.assessmentCourseId(),
                 Integer.parseInt(ctx.newActivityCmid), ctx.newActivityName);
     }
 
@@ -822,7 +854,7 @@ public class AssessmentUserFunctionalitySteps {
         if (ctx.context != null) {
             try { ctx.context.close(); } catch (Throwable ignored) {}
         }
-        ctx.context = GlobalHooks.browser.newContext(opts);
+        ctx.context = BrowserUi.newContext(GlobalHooks.browser, opts);
         ctx.page = ctx.context.newPage();
         ctx.page.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
         GlobalHooks.ensureAdminSession(ctx.context, ctx.page);

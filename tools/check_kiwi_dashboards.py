@@ -7,7 +7,7 @@ dashboard has gone stale after cases were added or re-marked.
 
 Semantics (taken from the dashboard's own formulas):
   Total Test Cases = rows with a Title
-  Executed         = Automated=Yes AND Case_Status in Pass/Fail/Blocked
+  Executed         = Automated in Yes/Partial/Deviation AND Case_Status in Pass/Fail/Blocked
   Not Automatable  = Automated=No
   Deferred         = Total - Executed - Not Automatable
   Completion %     = Executed / (Total - Not Automatable)
@@ -47,7 +47,7 @@ def tally(sheet) -> collections.Counter:
         automated = str(sheet.cell(row=row, column=AUTOMATED_COL).value or "").strip()
         if status in RUN_STATUSES:
             counts["run"] += 1
-            if automated.lower() == "yes":
+            if automated.lower() in ("yes", "partial", "deviation"):
                 counts["executed"] += 1
         match = next((s for s in AUTOMATION_STATUSES if s.lower() == automated.lower()), None)
         counts[match or "Not marked"] += 1

@@ -181,15 +181,38 @@ public final class AllCoursesPage extends BasePage {
 
     public void search(String query) {
         closeDescriptionModal();
-        Locator input = catalogSearchInput();
-        input.waitFor(new Locator.WaitForOptions()
-                .setState(WaitForSelectorState.VISIBLE).setTimeout(20_000));
-        input.fill(query);
-        input.dispatchEvent("input");
-        input.dispatchEvent("change");
-        input.press("Enter");
-        page.waitForTimeout(500);
-        waitForCatalogSettled();
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            try {
+                if (attempt > 1) {
+                    open();
+                    page.waitForTimeout(600);
+                }
+                Locator input = catalogSearchInput();
+                input.waitFor(new Locator.WaitForOptions()
+                        .setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
+                input.click();
+                input.fill("");
+                input.fill(query);
+                input.dispatchEvent("input");
+                input.dispatchEvent("change");
+                // Catalog search is AJAX-heavy; default press() waits for navigation and flakes under parallel load.
+                input.press("Enter", new Locator.PressOptions().setNoWaitAfter(true));
+                page.waitForTimeout(800);
+                waitForCatalogSettled();
+                return;
+            } catch (RuntimeException e) {
+                last = e;
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (attempt < 4 && (msg.contains("Execution context was destroyed")
+                        || msg.contains("Timeout") || msg.contains("navigation"))) {
+                    page.waitForTimeout(1_200);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (last != null) throw last;
     }
 
     /** Fresh catalog load, then search until that course tile is present. */
@@ -239,43 +262,59 @@ public final class AllCoursesPage extends BasePage {
     }
 
     public List<String> visibleCourseNames() {
-        Object raw = page.locator(COURSE_CARD).evaluateAll("""
-                els => els.filter(e => {
-                    const s = getComputedStyle(e);
-                    return s.display !== 'none' && s.visibility !== 'hidden' && e.getClientRects().length;
-                  }).map(e => {
-                    const id = e.getAttribute('data-course-id') || e.getAttribute('data-courseid') || '';
-                    const n = (id && document.getElementById('course-title-' + id))
-                      || e.querySelector('.course_tail_course_name, [id^="course-title-"], [data-region="course-name"], .course-name, .coursename, h3, h4, h5');
-                    return ((n && (n.innerText || n.textContent)) || e.getAttribute('data-coursename') || '').trim();
-                  }).filter(Boolean)
-                """);
-        List<String> out = new ArrayList<>();
-        if (raw instanceof List<?> list) {
-            for (Object o : list) if (o != null && !o.toString().isBlank()) out.add(o.toString().trim());
+        for (int attempt = 0; attempt < 8; attempt++) {
+            try {
+                Object raw = page.locator(COURSE_CARD).evaluateAll("""
+                        els => els.filter(e => {
+                            const s = getComputedStyle(e);
+                            return s.display !== 'none' && s.visibility !== 'hidden' && e.getClientRects().length;
+                          }).map(e => {
+                            const id = e.getAttribute('data-course-id') || e.getAttribute('data-courseid') || '';
+                            const n = (id && document.getElementById('course-title-' + id))
+                              || e.querySelector('.course_tail_course_name, [id^="course-title-"], [data-region="course-name"], .course-name, .coursename, h3, h4, h5');
+                            return ((n && (n.innerText || n.textContent)) || e.getAttribute('data-coursename') || '').trim();
+                          }).filter(Boolean)
+                        """);
+                List<String> out = new ArrayList<>();
+                if (raw instanceof List<?> list) {
+                    for (Object o : list) if (o != null && !o.toString().isBlank()) out.add(o.toString().trim());
+                }
+                return out;
+            } catch (RuntimeException e) {
+                if (attempt == 7) throw e;
+                page.waitForTimeout(500);
+            }
         }
-        return out;
+        return List.of();
     }
 
     /** Stable card identity for uniqueness checks (names can collide / be blank on partial renders). */
     public List<String> visibleCourseIds() {
-        Object raw = page.locator(COURSE_CARD).evaluateAll("""
-                els => els.filter(e => {
-                    const s = getComputedStyle(e);
-                    return s.display !== 'none' && s.visibility !== 'hidden' && e.getClientRects().length;
-                  }).map(e => {
-                    const explicit = e.getAttribute('data-course-id') || e.getAttribute('data-courseid');
-                    if (explicit) return explicit;
-                    const a = e.querySelector("a[href*='course/view.php']");
-                    const m = a ? (a.getAttribute('href') || '').match(/[?&]id=(\\d+)/) : null;
-                    return m ? m[1] : '';
-                  }).filter(Boolean)
-                """);
-        List<String> out = new ArrayList<>();
-        if (raw instanceof List<?> list) {
-            for (Object o : list) if (o != null && !o.toString().isBlank()) out.add(o.toString().trim());
+        for (int attempt = 0; attempt < 8; attempt++) {
+            try {
+                Object raw = page.locator(COURSE_CARD).evaluateAll("""
+                        els => els.filter(e => {
+                            const s = getComputedStyle(e);
+                            return s.display !== 'none' && s.visibility !== 'hidden' && e.getClientRects().length;
+                          }).map(e => {
+                            const explicit = e.getAttribute('data-course-id') || e.getAttribute('data-courseid');
+                            if (explicit) return explicit;
+                            const a = e.querySelector("a[href*='course/view.php']");
+                            const m = a ? (a.getAttribute('href') || '').match(/[?&]id=(\\d+)/) : null;
+                            return m ? m[1] : '';
+                          }).filter(Boolean)
+                        """);
+                List<String> out = new ArrayList<>();
+                if (raw instanceof List<?> list) {
+                    for (Object o : list) if (o != null && !o.toString().isBlank()) out.add(o.toString().trim());
+                }
+                return out;
+            } catch (RuntimeException e) {
+                if (attempt == 7) throw e;
+                page.waitForTimeout(500);
+            }
         }
-        return out;
+        return List.of();
     }
 
     public int visibleCardCount() {
@@ -522,10 +561,18 @@ public final class AllCoursesPage extends BasePage {
     }
 
     public boolean loaderVisible() {
-        Locator l = page.locator(LOADER);
-        for (int i = 0; i < l.count(); i++) {
-            try { if (l.nth(i).isVisible()) return true; } catch (RuntimeException ignored) {}
-        }
+        try {
+            Locator l = page.locator(LOADER);
+            int n;
+            try {
+                n = l.count();
+            } catch (RuntimeException e) {
+                return true;
+            }
+            for (int i = 0; i < n; i++) {
+                try { if (l.nth(i).isVisible()) return true; } catch (RuntimeException ignored) {}
+            }
+        } catch (RuntimeException ignored) {}
         return false;
     }
 
@@ -603,6 +650,11 @@ public final class AllCoursesPage extends BasePage {
         return responses;
     }
 
+    /** Wait until catalog AJAX batches finish rendering (safe to read card ids/names). */
+    public void waitForCatalogReady() {
+        waitForCatalogSettled();
+    }
+
     public void waitFor(BooleanSupplier condition, String message) {
         long deadline = System.currentTimeMillis() + 20_000;
         while (System.currentTimeMillis() < deadline) {
@@ -613,7 +665,7 @@ public final class AllCoursesPage extends BasePage {
     }
 
     private void waitForCatalogSettled() {
-        long deadline = System.currentTimeMillis() + 15_000;
+        long deadline = System.currentTimeMillis() + 30_000;
         int stable = 0;
         int previous = -1;
         while (System.currentTimeMillis() < deadline) {

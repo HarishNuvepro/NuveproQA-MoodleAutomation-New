@@ -4,7 +4,7 @@
 
 Feature: Assessment — Assessment Retake Cooldown
 
-  @A146
+  @A146 @mediumbatch1
   Scenario: The attempts allowed field is present on the form
     Given a challenge activity form for cooldown checks
     Then the attempts allowed field is on the form

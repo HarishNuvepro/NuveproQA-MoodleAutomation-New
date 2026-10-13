@@ -76,6 +76,17 @@ public final class SandboxTestData {
                     .descriptionSource("git")
                     .descriptionGitUrl(AssessmentTestData.GIT_INSTRUCTIONS_URL)
                     .build();
+            case "sandbox_create_git_yes" -> new AssessmentCreateSpec.Builder()
+                    .name("AUTO Sandbox create-git-yes")
+                    .adminName("AUTO Sandbox Admin Git Yes")
+                    .labType("playground")
+                    .templateContains("aws.account")
+                    .descriptionSource("git")
+                    .descriptionGitUrl(AssessmentTestData.GIT_INSTRUCTIONS_URL)
+                    .exportPdf(true)
+                    .parallelView(true)
+                    // Help video: not asserted on sandbox (control often absent or site-default Yes).
+                    .build();
             case "sandbox_missing_name" -> baseline("missing-name").omitName(true).build();
             case "sandbox_missing_template" -> baseline("missing-tpl").omitTemplate(true).build();
             // Legacy aliases kept for any old runners / docs
@@ -136,7 +147,8 @@ public final class SandboxTestData {
                  "sandbox_vm_vpat", "sandbox_catalog_unlimited" -> new String[]{dataset.trim()};
             // create-suite keys prefer themselves only
             case "sandbox_create_yes", "sandbox_create_no", "sandbox_create_edit", "sandbox_desc_git",
-                 "sandbox_basic", "sandbox_general", "sandbox_admin_name" -> new String[]{dataset.trim()};
+                 "sandbox_create_git_yes", "sandbox_basic", "sandbox_general", "sandbox_admin_name" ->
+                    new String[]{dataset.trim()};
             default -> new String[]{dataset.trim()};
         };
     }

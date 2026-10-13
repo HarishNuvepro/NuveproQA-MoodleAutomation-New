@@ -25,6 +25,286 @@ public class ChallengeActivityForm extends BasePage {
         super(page);
     }
 
+    /** Opens the add-activity picker (other modules). One chooser try, then legacy {@code /course/mod.php}. */
+    public void openCourseActivityChooser(String courseId) {
+        navigate("/course/view.php?id=" + courseId);
+        turnEditingOn(courseId);
+        page.locator("#section-0").scrollIntoViewIfNeeded();
+        page.waitForTimeout(500);
+        Locator headerChooser = page.locator(
+                "#section-0 .course-section-header .section-modchooser-link, "
+                        + "#section-0 .section-modchooser-link[data-sectionnum='0']");
+        if (headerChooser.count() > 0) {
+            try {
+                headerChooser.first().scrollIntoViewIfNeeded();
+                headerChooser.first().click(new Locator.ClickOptions().setForce(true).setTimeout(5_000));
+                waitForActivityChooserOpen(5_000);
+                if (activityChooserSeemsOpen()) return;
+            } catch (RuntimeException ignored) {}
+        }
+        openAddModuleListPage(courseId);
+    }
+
+    /**
+     * @MCI-9 only: course page → Turn editing on → Add activity → Activity Chooser modal.
+     * Does not use {@code /course/mod.php} or direct {@code modedit.php}.
+     */
+    public void openActivityChooserModalStrict(String courseId) {
+        navigate("/course/view.php?id=" + courseId);
+        turnEditingOn(courseId);
+        page.waitForTimeout(800);
+        page.locator("#section-0").scrollIntoViewIfNeeded();
+        Locator triggers = page.locator(
+                "#section-0 .course-section-header .section-modchooser-link, "
+                        + "#section-0 .course-section-header [data-action='open-chooser'], "
+                        + "#section-0 [data-action='open-chooser'].section-modchooser-link, "
+                        + "#section-0 [data-action='open-chooser']");
+        if (triggers.count() == 0) {
+            triggers = page.locator(
+                    "#section-0 .section-modchooser-link, #section-0 [data-action='open-chooser']");
+        }
+        for (int i = 0; i < triggers.count(); i++) {
+            try {
+                Locator t = triggers.nth(i);
+                if (!t.isVisible()) continue;
+                t.scrollIntoViewIfNeeded();
+                t.click(new Locator.ClickOptions().setForce(true).setTimeout(10_000));
+                if (waitForActivityChooserReady(25_000) && !page.url().contains("/course/mod.php")) {
+                    System.out.println("[MCI-9] Activity Chooser open url=" + page.url());
+                    return;
+                }
+            } catch (RuntimeException ignored) {}
+        }
+        throw new AssertionError("Activity Chooser did not open from the course page (url="
+                + page.url() + ") — turn editing on and use Add an activity / modchooser");
+    }
+
+    /**
+     * True when CloudLabs ({@code mod_cloudlabs}) is visible in the open Activity Chooser and can be selected.
+     */
+    public boolean cloudlabsLabListedInOpenActivityChooserModal() {
+        if (page.url().contains("/course/mod.php") || page.url().contains("modedit.php")) {
+            return false;
+        }
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline) {
+            if (activityChooserReadyForPick()) {
+                for (String term : new String[]{"cloudlabs", "CloudLabs", "nuvepro", "Nuvepro", "lab"}) {
+                    fillActivityChooserSearch(term);
+                    if (visibleCloudlabsChooserOption() != null || cloudlabsOptionInChooserDom()) {
+                        return true;
+                    }
+                }
+                if (visibleCloudlabsChooserOption() != null || cloudlabsOptionInChooserDom()) {
+                    return true;
+                }
+            }
+            page.waitForTimeout(400);
+        }
+        return false;
+    }
+
+    /** Human-readable label shown in the chooser for CloudLabs Lab (for assertion messages). */
+    public String cloudlabsLabChooserLabel() {
+        Locator option = visibleCloudlabsChooserOption();
+        if (option == null) return "";
+        try {
+            String aria = option.getAttribute("aria-label");
+            if (aria != null && !aria.isBlank()) return aria.trim();
+            return option.innerText().trim();
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    private boolean activityChooserModalOpen() {
+        if (page.url().contains("/course/mod.php")) return false;
+        return activityChooserSearchVisible()
+                || page.locator(".activitychooser:visible, .modchooser:visible").count() > 0;
+    }
+
+    private boolean activityChooserReadyForPick() {
+        return activityChooserSearchVisible() || cloudlabsOptionInChooserDom();
+    }
+
+    private boolean activityChooserSearchVisible() {
+        Locator search = page.locator(
+                "[role=dialog] input[type='search']:visible, "
+                        + "[data-region='modal-container'] input[type='search']:visible, "
+                        + ".modal.show input[type='search']:visible, "
+                        + ".activitychooser input[type='search']:visible");
+        return search.count() > 0;
+    }
+
+    private boolean waitForActivityChooserReady(long maxMs) {
+        long deadline = System.currentTimeMillis() + maxMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (activityChooserReadyForPick() && !page.url().contains("/course/mod.php")) {
+                page.waitForTimeout(500);
+                return true;
+            }
+            page.waitForTimeout(300);
+        }
+        return activityChooserReadyForPick();
+    }
+
+    private boolean cloudlabsOptionInChooserDom() {
+        Object found = page.evaluate("""
+                () => {
+                  const roots = [
+                    ...document.querySelectorAll('.modal.show, [role=dialog][aria-modal="true"], '
+                      + '[data-region="modal-container"] .modal, .activitychooser')
+                  ];
+                  const inRoot = (root) => root && (
+                    root.querySelector('[data-modname="cloudlabs"], [data-internal="cloudlabs"], '
+                      + 'a[href*="add=cloudlabs"], .modicon_cloudlabs, button[data-modname="cloudlabs"]')
+                    || /cloudlabs|nuvepro.*lab/i.test(root.innerText || '')
+                  );
+                  for (const r of roots) { if (inRoot(r)) return true; }
+                  return !!document.querySelector('[data-modname="cloudlabs"], a[href*="add=cloudlabs"]');
+                }
+                """);
+        return Boolean.TRUE.equals(found);
+    }
+
+    private void fillActivityChooserSearch(String term) {
+        Locator search = page.locator(
+                "[role=dialog] input[type='search'], [data-region='modal-container'] input[type='search'], "
+                        + "[role=dialog] input[type='text'], .activitychooser input[type='search'], "
+                        + ".modal.show input[type='search']");
+        for (int i = 0; i < search.count(); i++) {
+            try {
+                if (search.nth(i).isVisible()) {
+                    search.nth(i).fill(term);
+                    page.waitForTimeout(900);
+                    return;
+                }
+            } catch (RuntimeException ignored) {}
+        }
+    }
+
+    private Locator visibleCloudlabsChooserOption() {
+        Locator options = cloudlabsChooserOptions();
+        for (int i = 0; i < options.count(); i++) {
+            try {
+                Locator o = options.nth(i);
+                if (!o.isVisible()) continue;
+                if (!o.isEnabled()) continue;
+                String href = nz(o.getAttribute("href"));
+                String mod = nz(o.getAttribute("data-modname"));
+                if (mod.equals("cloudlabs") || href.contains("add=cloudlabs")
+                        || o.locator(".modicon_cloudlabs").count() > 0) {
+                    return o;
+                }
+            } catch (RuntimeException ignored) {}
+        }
+        Locator byRole = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions()
+                .setName(Pattern.compile("cloudlabs|nuvepro.*lab", Pattern.CASE_INSENSITIVE)));
+        Locator byLink = page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions()
+                .setName(Pattern.compile("cloudlabs|nuvepro.*lab", Pattern.CASE_INSENSITIVE)));
+        for (int i = 0; i < byLink.count(); i++) {
+            try {
+                if (byLink.nth(i).isVisible()) return byLink.nth(i);
+            } catch (RuntimeException ignored) {}
+        }
+        for (int i = 0; i < byRole.count(); i++) {
+            try {
+                if (byRole.nth(i).isVisible() && byRole.nth(i).isEnabled()) {
+                    return byRole.nth(i);
+                }
+            } catch (RuntimeException ignored) {}
+        }
+        return null;
+    }
+
+    /** Legacy add-module list — fast and reliable on busy automation courses. */
+    public void openAddModuleListPage(String courseId) {
+        navigate("/course/mod.php?id=" + courseId);
+        page.waitForTimeout(1_500);
+    }
+
+    /** Lab / cloudlabs module visible in the open activity chooser (modal or dialog). */
+    public boolean cloudlabsListedInActivityChooser(String courseId) {
+        if (page.url().contains("modedit.php") && page.url().contains("cloudlabs")) return true;
+        for (String term : new String[]{"cloudlabs", "lab", "nuvepro"}) {
+            Locator search = page.locator(
+                    "[role=dialog] input[type='search'], [data-region='modal-container'] input[type='search'], "
+                            + "[role=dialog] input[type='text'], .activitychooser input[type='search']");
+            if (search.count() > 0) {
+                try {
+                    if (search.first().isVisible()) {
+                        search.first().fill(term);
+                        page.waitForTimeout(800);
+                    }
+                } catch (RuntimeException ignored) {}
+            }
+            if (cloudlabsChooserOptions().count() > 0) return true;
+            if (chooserPanelMentionsLab()) return true;
+        }
+        if (cloudlabsChooserOptions().count() > 0 || chooserPanelMentionsLab()) return true;
+        if (page.url().contains("/course/mod.php")) {
+            return page.locator("a[href*='add=cloudlabs'], .modicon_cloudlabs").count() > 0
+                    || page.locator("#region-main, body").first().innerText().toLowerCase().contains("lab");
+        }
+        openAddModuleListPage(courseId);
+        return page.locator("a[href*='add=cloudlabs'], .modicon_cloudlabs").count() > 0
+                || openAddFormDirect(courseId);
+    }
+
+    private boolean chooserPanelMentionsLab() {
+        Locator panels = page.locator(
+                "[role=dialog]:visible, [data-region='modal-container']:visible, "
+                        + ".activitychooser:visible, .modchooser:visible");
+        for (int i = 0; i < panels.count(); i++) {
+            try {
+                String text = panels.nth(i).innerText().toLowerCase();
+                if (text.contains("lab") && !text.isBlank()) return true;
+            } catch (RuntimeException ignored) {}
+        }
+        return false;
+    }
+
+
+    /** Course UI activity chooser only — picks Lab and lands on modedit (fallback flows). */
+    public boolean openLabViaActivityChooser(String courseId) {
+        openCourseActivityChooser(courseId);
+        if (!pickLabFromChooser()) return false;
+        try {
+            page.locator("#id_name").waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE).setTimeout(30_000));
+            ensureExpanded();
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private Locator cloudlabsChooserOptions() {
+        return page.locator(
+                "[data-modname='cloudlabs'], [data-internal='cloudlabs'], "
+                        + "a.addlink[data-modname='cloudlabs'], .activityoption[data-modname='cloudlabs'], "
+                        + "button[data-modname='cloudlabs'], [role='option'][data-modname='cloudlabs'], "
+                        + ".modicon_cloudlabs, a[href*='add=cloudlabs'], "
+                        + "[class*='modname_cloudlabs'], [aria-label*='Lab' i][data-modname='cloudlabs']");
+    }
+
+    private void waitForActivityChooserOpen(long maxMs) {
+        long deadline = System.currentTimeMillis() + maxMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (activityChooserSeemsOpen()) {
+                page.waitForTimeout(500);
+                return;
+            }
+            page.waitForTimeout(300);
+        }
+    }
+
+    private boolean activityChooserSeemsOpen() {
+        if (cloudlabsChooserOptions().count() > 0) return true;
+        return page.locator("[role=dialog]:visible, [data-region='modal-container']:visible, "
+                + ".activitychooser:visible, .modchooser:visible").count() > 0;
+    }
+
     /** Open the Lab add form — direct modedit URL first (fast); course chooser only as fallback. */
     public void openAddFormFromCourse(String courseId) {
         if (!openAddFormDirect(courseId)) {
@@ -605,29 +885,49 @@ public class ChallengeActivityForm extends BasePage {
     }
 
     private boolean pickLabFromChooser() {
-        Locator add = page.locator("#section-0 [data-action='open-chooser'], "
-                + "li#section-0 .activity-add, #section-0 a.section-modchooser-link, "
-                + "#section-0 button:has-text('Add an activity'), "
-                + "button:has-text('Add an activity or resource')");
-        if (add.count() == 0) return false;
-        try { add.first().click(); } catch (RuntimeException e) { return false; }
-        page.waitForTimeout(1_200);
-        Locator search = page.locator("[data-region='modal-container'] input[type='search'], "
-                + "[data-region='modal-container'] input[type='text'], "
-                + ".modal.show input[type='search']");
-        if (search.count() > 0 && search.first().isVisible()) {
-            search.first().fill("cloudlabs");
-            page.waitForTimeout(800);
+        if (!activityChooserSeemsOpen()) {
+            Locator add = page.locator(
+                    "#section-0 .section-modchooser-link, #section-0 [data-action='open-chooser'], "
+                            + "#section-0 button.section-modchooser, "
+                            + "li#section-0 .activity-add, #section-0 a.section-modchooser-link, "
+                            + "#section-0 button:has-text('Add an activity'), "
+                            + "button:has-text('Add an activity or resource')");
+            if (add.count() == 0) return false;
+            try {
+                add.first().scrollIntoViewIfNeeded();
+                add.first().click(new Locator.ClickOptions().setTimeout(10_000));
+            } catch (RuntimeException e) {
+                return false;
+            }
         }
-        Locator lab = page.locator("[data-internal='cloudlabs'], [data-modname='cloudlabs'], "
-                + ".modicon_cloudlabs, a[href*='add=cloudlabs']");
-        if (lab.count() == 0) {
-            lab = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions()
-                    .setName(Pattern.compile("cloudlabs|\\blab\\b", Pattern.CASE_INSENSITIVE)));
+        waitForActivityChooserOpen(15_000);
+        for (String term : new String[]{"cloudlabs", "lab", "nuvepro"}) {
+            Locator search = page.locator(
+                    "[role=dialog] input[type='search'], [data-region='modal-container'] input[type='search'], "
+                            + "[role=dialog] input[type='text'], .modal.show input[type='search']");
+            if (search.count() > 0) {
+                try {
+                    if (search.first().isVisible()) {
+                        search.first().fill(term);
+                        page.waitForTimeout(900);
+                    }
+                } catch (RuntimeException ignored) {}
+            }
+            Locator lab = cloudlabsChooserOptions();
+            if (lab.count() == 0) {
+                lab = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions()
+                        .setName(Pattern.compile("cloudlabs|\\blab\\b", Pattern.CASE_INSENSITIVE)));
+            }
+            if (lab.count() > 0) {
+                try {
+                    lab.first().click(new Locator.ClickOptions().setTimeout(10_000));
+                    page.waitForTimeout(2_000);
+                    if (page.url().contains("modedit.php") || page.locator("#id_name").count() > 0) {
+                        return true;
+                    }
+                } catch (RuntimeException ignored) {}
+            }
         }
-        if (lab.count() == 0) return false;
-        try { lab.first().click(); } catch (RuntimeException e) { return false; }
-        page.waitForTimeout(2_000);
         return page.url().contains("modedit.php") || page.locator("#id_name").count() > 0;
     }
 

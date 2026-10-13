@@ -20,7 +20,7 @@ Copy `.env.example` to `.env` and fill in (the `.env` is git-ignored):
   real state and to extend/expire its duration so long-running lab tests don't expire mid-run.
 
 > Note: quote values that contain `#` (e.g. passwords) in `.env`, and keep the file BOM-free.
-> Tags that DON'T need CloudLabs or a running lab: `@users`, `@guided`. Everything under
+> Tags that DON'T need CloudLabs or a running lab: `@users`, `@practice_project` (form/landing). Everything under
 > `@provisioning` spins a real cloud lab (slow; ~5-min deletes) and needs the CloudLabs vars.
 
 ## Run (from this folder: `automation-java`)
@@ -42,7 +42,8 @@ Each module is a tag. Fast/no-cloud modules first; provisioning modules spin a r
 | **Moodle users** (create/login/suspend/email + derived gaps) | `@cat_users` / `@users` | `mvnw test -Pwatch "-Dcucumber.tags=@cat_users"` | WS token |
 | One user TC | `@U-user-1` … `@U-user-25` | `mvnw test -Pwatch "-Dcucumber.tags=@U-user-1"` | WS token |
 | Derived user gaps only (Kiwi) | `@CGAP-U-1 or @CGAP-U-2 or ...` | `mvnw test -Pwatch "-Dcucumber.tags=@CGAP-U-1 or @CGAP-U-8"` | WS token |
-| **Guided** (landing/admin/config presence) | `@guided` | `mvnw test "-Dcucumber.tags=@guided"` | `GUIDED_CMID` |
+| **Practice Project** (form, landing, admin smoke) | `@practice_project` | `mvnw test "-Dcucumber.tags=@practice_project and not @provisioning"` | fixture cmid |
+| **Practice Project** lab lifecycle | `@guidedlab` | `mvnw test -Pslow "-Dcucumber.tags=@guidedlab"` | CloudLabs |
 | Playground **state actions** (start/stop/delete/sync) | `@stateactions` | `mvnw test "-Dcucumber.tags=@stateactions"` | CloudLabs |
 | Sandbox **student user** (landing/console/notes/Access Lab) | `@SB-user-1` | `mvnw test -Pwatch "-Dcucumber.tags=@SB-user-1"` | CloudLabs |
 | **Student** self-service (start/stop own lab) | `@studentaction` | `mvnw test "-Dcucumber.tags=@studentaction"` | CloudLabs |

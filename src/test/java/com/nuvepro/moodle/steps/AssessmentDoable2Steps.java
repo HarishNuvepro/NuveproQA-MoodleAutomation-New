@@ -7,6 +7,7 @@ import com.microsoft.playwright.Page;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.AssessmentAdmin;
 import com.nuvepro.moodle.pages.ManageLabs;
 import io.cucumber.java.AfterAll;
@@ -66,7 +67,7 @@ public class AssessmentDoable2Steps {
         if (courseId == 0) throw new SkipException("could not determine the assessment course id");
         completedUser = ApiClient.createUser(System.currentTimeMillis());
         ApiClient.enrolUser(completedUser.id, courseId, 5);
-        completedCtx = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        completedCtx = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         Page p = completedCtx.newPage();
         p.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);

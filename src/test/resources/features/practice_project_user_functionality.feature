@@ -1,5 +1,7 @@
-# Practice Project — student / user functionality (landing, console, lab variants).
+# Practice Project — student flows, lab lifecycle, attempts (merged former guided_* features).
+# Provisioning: @practice_project @guidedlab / @guidedattempts @provisioning
 #   .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@PP-5"
+#   .\mvnw.cmd test -Pslow -Pwatch "-Dcucumber.tags=@guidedlab"
 #   .\mvnw.cmd test -Pwatch "-Dcucumber.features=src/test/resources/features/practice_project_user_functionality.feature"
 
 Feature: Practice Project user functionality
@@ -18,14 +20,51 @@ Feature: Practice Project user functionality
     Then the practice project landing shows dates time limit and allowed attempts
     And the practice project landing shows description Read More and intro video
 
-  @PP-9
-  Scenario: Practice Project console exposes renamed controls and permits in-progress override
+  @CGAP-PGG-13 @guidedgaps @practice_project
+  Scenario: A student does not see the guided admin manage buttons
+    Given a student is enrolled in the course
+    When the student opens the guided activity
+    Then the student does not see the guided admin manage buttons
+
+  @CGAP-PGG-14 @guidedgaps @practice_project
+  Scenario: A student cannot open the User Guided Project admin page
+    Given a student is enrolled in the course
+    When the student opens the guided activity
+    Then the student cannot open the User Guided Project admin page
+
+  @PP-11 @PP-9 @PP-27 @PP-29 @PP-33 @PP-48 @PP-139
+  @PGG-14 @PGG-15 @PGG-16 @PGG-17 @CGAP-PGG-1 @CGAP-PGG-5 @CGAP-PGG-8 @CGAP-PGG-9
+  @practice_project @guidedlab @provisioning
+  Scenario: A student runs the practice project lab lifecycle - start, stop, continue, submit
     Given a student is enrolled in the course
     When the student starts the guided project
     Then the guided control panel is shown
-    And the guided console has Submit and no Get Progress action
+    And the guided lab reaches Running
+    And the in-progress student can open Add Override
+    Then the guided console has Submit and no Get Progress action
     And the guided console shows instructions duration and support
-    And the guided Stop button is present
+    And the running guided console shows Lab Credentials
+    And the Stop and Submit actions show meaningful confirmations
+    When the student stops the guided lab
+    Then the guided lab is Stopped and the student returns to the landing
+    When the student continues the guided project
+    Then the guided control panel is shown
+    When the student submits the guided attempt
+
+  @PP-12 @PP-20 @PP-21 @PP-37 @PP-42 @CGAP-PGG-2 @CGAP-PGG-3 @CGAP-PGG-5
+  @practice_project @guidedattempts @guidedlab @provisioning
+  Scenario: A student submits an attempt and starts a new one after the cooldown
+    Given a student is enrolled in the course
+    When the student starts the guided project
+    Then the guided control panel is shown
+    And the guided lab reaches Running
+    When the student submits the guided attempt while the lab is running
+    Then the attempt is submitted and the student returns to the landing
+    And the submitted guided attempt records evaluation and checkpoint results
+    And the completed with-progress attempt shows its progress icon
+    And the new-attempt cooldown is observed or already elapsed
+    When the student starts a new attempt after the cooldown
+    Then the guided control panel is shown
 
   @PP-19 @guidedlab @provisioning
   Scenario: Without-progress project submits successfully without progress controls
@@ -66,7 +105,7 @@ Feature: Practice Project user functionality
     And the guided lab reaches Running
     Then the timed attempt completes and its configured lab action occurs
 
-  @PP-31
+  @PP-31 @PP-30 @easybatch2 @deviation
   Scenario: Practice Project exposes the manual Complete action
     Given I open the guided activity
     Then the manual Practice Project Complete action is available

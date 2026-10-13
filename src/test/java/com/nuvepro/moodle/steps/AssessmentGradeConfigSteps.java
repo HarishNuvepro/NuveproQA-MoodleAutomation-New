@@ -6,6 +6,7 @@ import com.microsoft.playwright.Page;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.AssessmentAdmin;
 import io.cucumber.java.After;
 import io.cucumber.java.en.Given;
@@ -83,7 +84,7 @@ public class AssessmentGradeConfigSteps {
         ApiClient.SeededUser u = ApiClient.createUser(System.currentTimeMillis());
         seeded.add(u);
         ApiClient.enrolUser(u.id, courseId, roleId);
-        BrowserContext c = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        BrowserContext c = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         roleContexts.add(c);
         Page p = c.newPage();

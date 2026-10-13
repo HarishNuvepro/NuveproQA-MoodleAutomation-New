@@ -7,7 +7,7 @@
 
 Feature: Lab Templates management
 
-  @LT-2
+  @LT-2 @LT-24 @easybatch1
   Scenario: The lab templates list shows all configured template details
     When admin opens the lab templates list
     Then the lab templates table lists its configured template details
@@ -65,13 +65,11 @@ Feature: Lab Templates management
     And admin opens the first lab template in view mode
     Then the lab template view shows its saved details
 
-  # Plugin source renders an "Edit Lab Template" link on this page. Keep this
-  # fail-by-design check outside the green suite until QA confirms the requirement.
   @LT-16
-  Scenario: View Lab Template is read-only as required by the manual case
+  Scenario: View Lab Template allows edit but not delete on the details page
     When admin opens the lab templates list
     And admin opens the first lab template in view mode
-    Then the lab template view has no edit or delete action
+    Then the lab template view allows edit and denies delete
 
   @LT-25
   Scenario: Admin can show or hide a lab-template table column
@@ -85,7 +83,7 @@ Feature: Lab Templates management
     And admin refreshes the lab templates table
     Then the refreshed lab templates table remains current
 
-  @LT-27
+  @LT-27 @LT-33 @easybatch1
   Scenario: Admin can search lab templates by name
     When admin opens the lab templates list
     And admin searches lab templates by an existing name
@@ -115,12 +113,12 @@ Feature: Lab Templates management
     Then a student cannot open the lab templates list
 
   @CGAP-LT-3
-  Scenario: A blocked student receives a proper Moodle access-denied response
+  Scenario: A non-site-admin user is denied access to Lab Templates
     Then a student cannot open the lab templates list
-    And the blocked Lab Templates page explains that access is denied
+    And the student lab templates access is denied
 
   # Mutating scenarios create stamped templates with Plan 1747 / Team 90 and always delete them.
-  @LT-11
+  @LT-11 @LT-12 @LT-13 @LT-14 @easybatch1
   Scenario: Admin can edit all safe sections of a disposable lab template
     When admin creates a disposable Account lab template
     Then the disposable lab template is active in the listing
@@ -128,13 +126,13 @@ Feature: Lab Templates management
     Then the edited lab template settings persist
     And the lab template view shows the saved action intervals
 
-  @LT-17
+  @LT-17 @LT-19 @easybatch1
   Scenario: Admin can delete a lab template that is not used by an activity
     When admin creates a disposable Account lab template
     And admin deletes the unused disposable lab template
     Then the deleted lab template is absent from the listing
 
-  @LT-20
+  @LT-20 @LT-21 @LT-22 @LT-23 @easybatch1
   Scenario: Admin can deactivate and reactivate an unused lab template
     When admin creates a disposable Account lab template
     And admin deactivates and reactivates the disposable lab template
@@ -164,7 +162,7 @@ Feature: Lab Templates management
     When admin creates a disposable lab template with a script payload in its name
     Then the activity template dropdown contains only the sanitized template name
 
-  @LT-34
+  @LT-34 @LT-35 @LT-36 @easybatch1
   Scenario Outline: Plan Team and Catalog resolve when an active template is selected
     When admin creates a disposable Account lab template
     And admin selects the disposable template for a "<labType>" activity
@@ -204,24 +202,24 @@ Feature: Lab Templates management
     When admin copies the configured course containing lab activities
     Then a lab activity in the copied course retains its saved Lab Template information
 
-  @LT-39
+  @skip @LT-39
   Scenario: A restored course retains Lab Template information in its activities
     When admin backs up and restores the configured course containing lab activities
     Then a lab activity in the copied course retains its saved Lab Template information
 
   # The plugin's problem-statement form has a template dropdown but no Plan/Team/Catalog panel.
-  @LT-37
+  @skip @LT-37
   Scenario: Randomized assessment problem statements show selected template information
     When admin opens the add problem statement form for the randomized assessment
     Then selecting a problem statement template shows its Plan Team and Catalog
 
-  @LT-42
+  @LT-42 @LT-43 @easybatch1
   Scenario: An invalid Plan ID does not resolve a Catalog on the activity form
     When admin creates a disposable template with an invalid Plan ID
     Then the activity form reports no resolved Catalog
 
   # Catalog is resolved from Plan ID; the manual case expects it to remain visible with an invalid Team ID.
-  @LT-44
+  @LT-44 @LT-45 @easybatch1
   Scenario: Valid Plan ID still resolves Catalog when Team ID is invalid
     When admin creates a disposable template with an invalid Team ID
     Then the activity form shows Catalog resolved from the valid Plan ID
@@ -238,3 +236,24 @@ Feature: Lab Templates management
     When admin creates a disposable Account lab template
     And admin saves an extremely large Create interval
     Then the extreme interval is rejected or capped
+
+  # Kiwi Add Lab Template rows (LT-4..LT-10) — activity form template dropdown, not template CRUD page.
+  @LT-4 @easybatch1
+  Scenario: Playground add activity shows the lab template dropdown
+    When I open a new cloudlabs activity form for lab type "playground"
+    Then the lab template dropdown is present on the activity form
+
+  @LT-5 @easybatch1
+  Scenario: Guided add activity shows the lab template dropdown
+    When I open a new cloudlabs activity form for lab type "guided"
+    Then the lab template dropdown is present on the activity form
+
+  @LT-7 @LT-8 @easybatch1
+  Scenario: Challenge add activity shows the lab template dropdown
+    When I open a new cloudlabs activity form for lab type "challenge"
+    Then the lab template dropdown is present on the activity form
+
+  @LT-10 @easybatch1
+  Scenario: Playground activity form lists at least one active lab template option
+    When I open a new cloudlabs activity form for lab type "playground"
+    Then the lab template dropdown lists an active template

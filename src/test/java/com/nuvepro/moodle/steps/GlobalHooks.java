@@ -1,8 +1,11 @@
 package com.nuvepro.moodle.steps;
 
 import com.microsoft.playwright.*;
+import com.microsoft.playwright.options.WaitUntilState;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.BrowserUi;
+import com.nuvepro.moodle.helpers.CrossProcessLock;
 import com.nuvepro.moodle.pages.PlaygroundControlPanel;
 import com.nuvepro.moodle.pages.PlaygroundLanding;
 import io.cucumber.java.AfterAll;
@@ -10,6 +13,9 @@ import io.cucumber.java.BeforeAll;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Run-wide setup/teardown for the BDD suite:
@@ -24,6 +30,8 @@ public final class GlobalHooks {
     static Playwright playwright;
     static Browser browser;
     static final Path STORAGE_STATE = Paths.get("target", "state.json");
+    private static final ReentrantLock ADMIN_LOGIN_LOCK = new ReentrantLock();
+    private static final CrossProcessLock ADMIN_LOGIN_CROSS = CrossProcessLock.named("admin-session-write");
     /** Set true by a step that provisions/starts a lab, so the @AfterAll safety net only
      *  runs when there could actually be a running lab (keeps non-provisioning runs clean). */
     public static volatile boolean labProvisioned = false;
@@ -42,28 +50,112 @@ public final class GlobalHooks {
         // Do not launch an unused sixth global browser.
         if (Boolean.getBoolean("sandbox.parallel")) return;
         playwright = Playwright.create();
-        browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
-                .setHeadless(Settings.HEADLESS).setSlowMo(Settings.SLOWMO_MS));
+        browser = playwright.chromium().launch(BrowserUi.defaultLaunchOptions());
+    }
+
+    /**
+     * Admin session cookie file for this JVM thread. Parallel workers must not share one
+     * {@code state.json} — concurrent {@code storageState()} writes corrupt the file and break uploads.
+     */
+    public static Path adminStorageStatePath() {
+        if (Boolean.getBoolean("sandbox.parallel")) {
+            return STORAGE_STATE.resolveSibling("state-parallel-" + Thread.currentThread().getId() + ".json");
+        }
+        return STORAGE_STATE;
+    }
+
+    /** Admin context options with the correct per-thread storage state file. */
+    public static Browser.NewContextOptions adminContextOptions() {
+        Browser.NewContextOptions opts = new Browser.NewContextOptions()
+                .setBaseURL(Settings.BASE_URL)
+                .setIgnoreHTTPSErrors(true);
+        Path statePath = adminStorageStatePath();
+        if (java.nio.file.Files.exists(statePath)) {
+            opts.setStorageStatePath(statePath);
+        } else if (java.nio.file.Files.exists(STORAGE_STATE)) {
+            opts.setStorageStatePath(STORAGE_STATE);
+        }
+        return opts;
     }
 
     /** Ensure the scenario's admin context is logged in; persist session when a fresh login was needed. */
     public static void ensureAdminSession(BrowserContext context, Page page) {
-        page.navigate(Settings.BASE_URL + "/my/",
-                new Page.NavigateOptions()
-                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
-                        .setTimeout(45_000));
+        if (Boolean.getBoolean("sandbox.parallel")) {
+            ADMIN_LOGIN_CROSS.lock(15, TimeUnit.MINUTES);
+            try {
+                ensureAdminSessionBody(context, page);
+            } finally {
+                ADMIN_LOGIN_CROSS.unlock();
+            }
+            return;
+        }
+        ensureAdminSessionBody(context, page);
+    }
+
+    private static void ensureAdminSessionBody(BrowserContext context, Page page) {
+        navigateAdminHome(page);
         if (Auth.isLoggedIn(page)) return;
-        Auth.loginAsAdmin(page);
-        context.storageState(new BrowserContext.StorageStateOptions().setPath(STORAGE_STATE));
+        ADMIN_LOGIN_LOCK.lock();
+        try {
+            navigateAdminHome(page);
+            if (!Auth.isLoggedIn(page)) {
+                Auth.loginAsAdmin(page);
+            }
+            context.storageState(new BrowserContext.StorageStateOptions().setPath(adminStorageStatePath()));
+        } finally {
+            ADMIN_LOGIN_LOCK.unlock();
+        }
+    }
+
+    /** {@code /my/} is hit by every parallel worker at once — retry timeouts and serialize via {@link #ensureAdminSession}. */
+    private static void navigateAdminHome(Page page) {
+        boolean parallel = Boolean.getBoolean("sandbox.parallel");
+        int attempts = parallel ? 4 : 2;
+        long timeoutMs = parallel ? 90_000 : 45_000;
+        RuntimeException last = null;
+        for (int i = 0; i < attempts; i++) {
+            try {
+                page.navigate(Settings.BASE_URL + "/my/",
+                        new Page.NavigateOptions()
+                                .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                                .setTimeout(timeoutMs));
+                return;
+            } catch (RuntimeException e) {
+                last = e;
+                String msg = String.valueOf(e.getMessage()).toLowerCase();
+                if (!msg.contains("timed_out") && !msg.contains("timeout")) {
+                    throw e;
+                }
+                page.waitForTimeout(2_000L * (i + 1));
+            }
+        }
+        if (last != null) {
+            throw last;
+        }
+    }
+
+    /** Seed per-thread storage from the serial run so parallel workers avoid simultaneous logins. */
+    public static void seedParallelStorageStateIfAbsent() {
+        if (!Boolean.getBoolean("sandbox.parallel")) return;
+        Path threadState = adminStorageStatePath();
+        if (java.nio.file.Files.exists(threadState)) return;
+        if (!java.nio.file.Files.exists(STORAGE_STATE)) return;
+        try {
+            java.nio.file.Files.createDirectories(threadState.getParent());
+            java.nio.file.Files.copy(STORAGE_STATE, threadState, StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.io.IOException e) {
+            System.out.println("[GlobalHooks] could not seed parallel storage state: " + e.getMessage());
+        }
     }
 
     @AfterAll
     public static void globalTeardown() {
         if (browser != null && labProvisioned && !skipLabTeardown) {
-            try (BrowserContext c = browser.newContext(new Browser.NewContextOptions()
+            try (BrowserContext c = BrowserUi.newContext(browser, new Browser.NewContextOptions()
                     .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true)
                     .setStorageStatePath(STORAGE_STATE))) {
                 Page p = c.newPage();
+                BrowserUi.preparePage(p);
                 p.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
                 com.nuvepro.moodle.pages.ManageLabs ml = new com.nuvepro.moodle.pages.ManageLabs(p);
                 if (teardownSectionId != null && !teardownSectionId.isBlank()) {

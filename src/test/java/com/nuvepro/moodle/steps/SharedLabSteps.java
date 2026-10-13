@@ -8,6 +8,7 @@ import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
 import com.nuvepro.moodle.helpers.CloudLabsClient;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ManageLabs;
 import com.nuvepro.moodle.pages.PlaygroundControlPanel;
 import com.nuvepro.moodle.pages.PlaygroundLanding;
@@ -418,7 +419,7 @@ public class SharedLabSteps {
 
     private Page seededPage() {
         if (seededPage == null) {
-            seededCtx = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+            seededCtx = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                     .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
             seededPage = seededCtx.newPage();
             seededPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
@@ -432,7 +433,7 @@ public class SharedLabSteps {
     @AfterAll
     public static void teardownSharedLab() {
         if (sharedUser == null) return;
-        try (BrowserContext c = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        try (BrowserContext c = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true)
                 .setStorageStatePath(GlobalHooks.STORAGE_STATE))) {
             Page p = c.newPage();

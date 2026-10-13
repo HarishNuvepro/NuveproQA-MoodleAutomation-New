@@ -8,7 +8,7 @@ SHEET = "Moodle_Lab_Templates"
 
 # Workbook row -> exact scenario reference verified green.
 LABTEMPLATE_TAGS = (
-    1, 2, 3, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24,
+    1, 2, 3, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
     25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 38, 40, 41,
     42, 43, 44, 45, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
     58, 62, 76, 80,
@@ -20,28 +20,31 @@ VERIFIED = {
 VERIFIED.update({
     5: "sandbox_user_functionality.feature @LT-4",
     6: "sandbox_user_functionality.feature @LT-5",
-    8: "sandbox_user_functionality.feature @LT-7; sandbox_actions.feature @LT-7",
+    7: "assessment_user_functionality.feature @LT-6",
+    8: "sandbox_user_functionality.feature @LT-7; sandbox.feature @LT-7",
     9: "sandbox_user_functionality.feature @LT-8",
     11: "sandbox_user_functionality.feature @LT-10",
+    60: "sandbox_user_functionality.feature @LT-59",
     61: "sandbox_user_functionality.feature @LT-60",
+    62: "sandbox_user_functionality.feature @LT-61",
     67: "sandbox_user_functionality.feature @LT-66",
-    68: "sandbox_actions.feature @LT-67",
-    74: "sandbox_actions.feature @LT-73",
-    71: "sandbox_actions.feature @LT-70",
-    84: "labtemplates.feature @CGAP-LT-1",
-    85: "labtemplates.feature @CGAP-LT-2",
-    87: "labtemplates.feature @CGAP-LT-4",
+    68: "sandbox.feature @LT-67",
+    74: "sandbox.feature @LT-73",
+    71: "sandbox.feature @LT-70",
+    84: "labtemplates.feature @CGAP-LT-3",
+    85: "labtemplates.feature @CGAP-LT-4",
 })
 
 DEVIATIONS = {}
 
 PARTIAL = {}
 
+DEFERRED = {}
+
 BLOCKED = {
     47: "No — browser errors covered by @LT-46; server-log verification needs log access",
     70: "No — Sandbox Create/Start covered by @LT-69; Guided/Assessment/Unpark need extra fixtures",
     78: "No — Create-failure recovery covered by @LT-77; Start/Unpark failure injection unavailable",
-    62: "No Park/Unpark API and PLAYGROUND_VM_CMID is not configured",
     64: "Real Create timing outcome is unspecified and needs a dedicated slow-plan fixture",
     65: "Real Start timing outcome is unspecified and needs a dedicated slow-plan fixture",
     66: "No Park/Unpark API and no parked VM fixture",
@@ -52,16 +55,16 @@ BLOCKED = {
     76: "Requires an LTI consumer and signed launch flow",
     79: "Requires a lab-create webhook inspection endpoint or server-log access",
     80: "Low priority and requires mutating/restoring the site-wide theme during transient progress",
-    7: "No — Plan 1747 returns no SubmitChallenge action-input schema",
-    10: "No — notification is enabled but activity reports Lab duration not Configured",
-    17: "No — view mode still renders Edit/Delete (required read-only page is not implemented)",
-    38: "No — problem-statement template selection has no Plan/Team/Catalog panel",
-    40: "No — restored course contains no CloudLabs activity to retain Plan/Team/Catalog",
-    60: "No — deployed console has no four-step Create progress markup",
-    82: "No — Lab Templates listing has no bulk export/import controls",
+    10: "No — @LT-9 @skip (sandbox_user_functionality): duration notification not verifiable; "
+        "remove scenario + LabTemplateSteps/SB-user notification steps when dropped",
     83: "No — unbounded interval 999999999 is accepted; no max validation",
-    86: "No — non-admin labtemplates.php returns a blank page, not Moodle access denied",
+    38: "No — Randomization problem-statement Plan/Team/Catalog not automatable for now (manual @LT-37)",
+    40: "No — Imported/restored course Plan/Team/Catalog not automatable for now (manual @LT-39)",
 }
+
+# Excel row 82 removed 2026-09-21 — bulk export/import not applicable to this application.
+# Row 86 was an empty duplicate deviation row for @CGAP-LT-3 (case lives on row 84).
+DELETE_ROWS = (82, 86, 87)
 
 
 COVERAGE = "Automation_Coverage"
@@ -112,6 +115,18 @@ def main() -> None:
     book = openpyxl.load_workbook(WORKBOOK)
     sheet = book[SHEET]
 
+    for row in sorted(DELETE_ROWS, reverse=True):
+        title = str(sheet.cell(row, 1).value or "")
+        summary = str(sheet.cell(row, 2).value or "").lower()
+        if "bulk export" in summary or "re-imported" in summary or "Gap Check" in title:
+            sheet.delete_rows(row, 1)
+            print(f"deleted sheet row {row} (bulk export/import case)")
+        elif row in (86, 87) and not title.strip() and not summary.strip():
+            sheet.delete_rows(row, 1)
+            print(f"deleted sheet row {row} (empty phantom case row)")
+        else:
+            print(f"skip delete row {row} — content changed ({title[:40]!r})")
+
     for row, reference in VERIFIED.items():
         sheet.cell(row, 11).value = "Yes"
         sheet.cell(row, 12).value = reference
@@ -128,14 +143,21 @@ def main() -> None:
         sheet.cell(row, 11).value = "Partial"
         sheet.cell(row, 12).value = reference
 
+    for row, reference in DEFERRED.items():
+        sheet.cell(row, 11).value = "Deferred"
+        sheet.cell(row, 12).value = reference
+        if not str(sheet.cell(row, 7).value or "").strip():
+            sheet.cell(row, 7).value = "NA"
+
     for row, reason in BLOCKED.items():
         sheet.cell(row, 11).value = "No"
         sheet.cell(row, 12).value = reason
+        sheet.cell(row, 7).value = "NA"
 
     refresh_coverage_row(book)
     book.save(WORKBOOK)
     print(f"marked {len(VERIFIED)} Lab Templates cases Yes, {len(PARTIAL)} Partial, "
-          f"and {len(DEVIATIONS)} Deviations")
+          f"{len(DEVIATIONS)} Deviations, {len(DEFERRED)} Deferred")
 
 
 if __name__ == "__main__":

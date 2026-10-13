@@ -53,6 +53,17 @@ public class GuidedLanding extends BasePage {
         return visible(START) || visible(CONTINUE) || visible(NEW_ATTEMPT);
     }
 
+    /** Click Start Practice Project and cancel the confirmation (no lab / console). */
+    public void startProjectThenCancel() {
+        page.locator(START).first().click();
+        page.waitForTimeout(600);
+        cancelModal();
+    }
+
+    public boolean hasStartProjectOnly() {
+        return visible(START) && !visible(CONTINUE) && !visible(NEW_ATTEMPT);
+    }
+
     public boolean adminManageButtonsPresent() {
         return page.locator(USER_LABS).count() > 0 && page.locator(USER_GUIDED).count() > 0;
     }

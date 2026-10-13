@@ -2,6 +2,7 @@ package com.nuvepro.moodle.steps;
 
 import com.microsoft.playwright.Locator;
 import com.nuvepro.moodle.config.Settings;
+import com.nuvepro.moodle.helpers.FormSubmit;
 import com.nuvepro.moodle.pages.AssessmentAdmin;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
@@ -34,8 +35,8 @@ public class AssessmentEasySteps {
 
     @Given("a new assessment challenge activity form")
     public void aNewChallengeForm() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
-        admin.openNewChallengeForm(Settings.COURSE_ID);
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
+        admin.openNewChallengeForm(ctx.assessmentCourseId());
     }
 
     @Then("the randomized problem statement field is present")
@@ -112,8 +113,8 @@ public class AssessmentEasySteps {
 
     @When("admin creates an assessment with the due date before the start date")
     public void createWithDueBeforeStart() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
-        admin.openNewChallengeForm(Settings.COURSE_ID);
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
+        admin.openNewChallengeForm(ctx.assessmentCourseId());
         ctx.page.locator("#id_name").fill("Auto invalid-dates " + System.currentTimeMillis());
         for (String f : new String[]{"submissionfromdate", "submissionduedate"}) {
             Locator en = ctx.page.locator("#id_" + f + "_enabled");
@@ -124,8 +125,8 @@ public class AssessmentEasySteps {
         if (fromYear.count() == 0) throw new SkipException("submission date fields not on the form");
         ctx.page.selectOption("#id_submissionduedate_year",
                 String.valueOf(Integer.parseInt(fromYear.inputValue()) - 1));   // due a year before start
-        ctx.page.locator("#id_submitbutton").click();
-        ctx.page.waitForTimeout(2_500);
+        FormSubmit.andAwaitNewPage(ctx.page, ctx.page.locator("#id_submitbutton"), 30_000);
+        ctx.page.waitForTimeout(1_000);
     }
 
     @Then("the activity is not created and a date validation error is shown")

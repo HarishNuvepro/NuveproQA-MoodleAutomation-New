@@ -1,31 +1,101 @@
-# Sandbox Manage Labs — admin flows (@SB-manage-*).
-# Same throwaway suite course as create/user (not COURSE_ID). Lab Delete only when
-# the scenario is about Delete. Cleanup: @sandbox-cleanup.
-# Fresh per-user lab where needed; lab id at creation; STATUS via CloudLabs API.
+# Sandbox — activity create (@SB-create-*) + Manage Labs admin (@SB-manage-*).
+# One throwaway suite course (not COURSE_ID). Activities/labs kept — no auto-delete. Cleanup: @sandbox-cleanup.
 #
-# @SB-manage-1…7   original Sync/Stop/No-labs flows
-# @SB-manage-8     combined delete + student message + create-after-delete
-# @SB-manage-9…22  gap-fill (restart, search, pagination, bulk, gates, etc.)
-# @SB-manage-23    Active + No labs page chrome
-# @SB-manage-24    Bulk Stop
-# @SB-manage-25    CloudLabs course progress report (admin)
-# Student console cases live in sandbox_user_functionality.feature.
+# Create registry (target/sandbox-activity-registry.properties):
+#   sandbox_create_yes  → @SB-create-1/2   (Yes toggles + admin/student names)
+#   sandbox_create_no   → @SB-create-3     (PDF / Parallel / Help = No)
+#   sandbox_create_edit → @SB-create-11    (create then edit+save)
+#   sandbox_desc_git    → @SB-create-6; sandbox_create_git_yes → @SB-create-2
+# @SB-create-7/8/9 — validation / student denied (no activity created).
+# Re-runs reuse registered cmids unless @fresh_activity is set.
 #
-# Bulk cases use 2 users for now (scale later). Pagination uses page-size=1 with 2–3 users.
-# Read-only cases (@SB-manage-10/16) share one named student + Active lab
-# (`manage_active`) so they do not each provision a new cloud lab.
-# Deletes (@SB-manage-8): 4 labs are deleted from 4 parallel browsers, then ONE
-# CloudLabs wait (~8 min) covers all four. Teardown does NOT Delete unless the scenario does.
+# Manage Labs: fresh per-user lab where needed; lab id at creation; STATUS via CloudLabs API.
+# Student console cases: sandbox_user_functionality.feature.
+# Bulk: 2 users; pagination page-size=1. @SB-manage-10/16 share `manage_active` student + lab.
+# @SB-manage-8: 4 parallel deletes + one shared CloudLabs wait (~8 min).
 #
-# Run this file: .\mvnw.cmd test -Pwatch "-Dcucumber.features=src/test/resources/features/sandbox_actions.feature"
-# Run one:       .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@SB-manage-8"
+# Run all (sequential): .\mvnw.cmd test -Pwatch "-Dcucumber.features=src/test/resources/features/sandbox.feature"
+# Create:   .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@SB-create-1"
+# Manage:   .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@SB-manage-8"
+#
+# Parallel (5 workers, sandbox.parallel=true) — see RUNNERS.md § Sandbox parallel
+#   Full file (incl. @provisioning): .\mvnw.cmd test -Psandbox-parallel
+#   Same via -Pparallel:             .\mvnw.cmd test -Pparallel "-DsuiteXmlFile=testng-parallel5.xml" "-Dparallel.browsers=5" "-Dcucumber.features=src/test/resources/features/sandbox.feature" "-Dcucumber.tags=not @sandbox-cleanup and not @module-cleanup"
+# working parallel run cmd : .\mvnw.cmd test -Pparallel "-DsuiteXmlFile=testng-parallel5.xml" "-Dparallel.browsers=5" "-Dcucumber.features=src/test/resources/features/sandbox.feature" "-Dcucumber.tags=not @sandbox-cleanup and not @module-cleanup" "-Dautomation.deferCleanup=true"
 
-Feature: Sandbox Manage Labs admin actions
 
-  # ---- Admin Manage Labs flows ----
-  # Student provisions from the console; admin verifies Sync Status + Stop on Manage Labs.
 
-  # 1) Admin Stop after student Start
+#   UI-only (skip cloud):            add "and not @provisioning" to -Dcucumber.tags
+#
+# Dependencies (parallel-safe design):
+#   • One suite course (CrossProcessLock) — all scenarios share target/sandbox-course.properties
+#   • Activity registry per dataset — @SB-create-* register cmids; @SB-manage-* reuse sandbox_user_lab
+#     (parallel workers wait up to 240s on registry if create has not run yet)
+#   • @fresh_activity (@SB-manage-8, -13/-24, -20) — new activity per run, no registry reuse
+#   • Lane sb-provision:shared:{cmid} — all @provisioning on sandbox_user_lab serialize CloudLabs/Manage Labs
+#   • Lane sbmanage:manage_active — @SB-manage-10 and @SB-manage-16 serialize (shared student/lab)
+#   • @SB-manage-8 — long delete wait (~6–9 min); uses @fresh_activity section (isolated)
+#   • @SB-manage-25 — reuses existing suite activity (no When-create in scenario)
+#   • Optional phased run: execute @SB-create-* once ( -Pwatch ), then -Psandbox-parallel for manage
+
+
+
+Feature: Sandbox — create activity and Manage Labs admin
+
+  # ========== Activity create (@SB-create-*) ==========
+
+  @SB-create-1
+  Scenario: Admin creates a sandbox with Yes settings and verifies admin vs student names
+    When admin creates a sandbox activity using "sandbox_create_yes"
+    Then the sandbox activity is created and visible to admin
+    And the sandbox saved settings match "sandbox_create_yes"
+    And admin sees the sandbox Activity Name for Admins on the edit form
+    And a student sees the sandbox activity name on the landing not the admin name
+
+  @SB-create-2
+  Scenario: Admin creates a sandbox with Git description PDF and Parallel enabled and verifies admin vs student names
+    When admin creates a sandbox activity using "sandbox_create_git_yes"
+    Then the sandbox activity is created and visible to admin
+    And the sandbox saved settings match "sandbox_create_git_yes"
+    And admin sees the sandbox Activity Name for Admins on the edit form
+    And a student sees the sandbox activity name on the landing not the admin name
+
+  @SB-create-3
+  Scenario: Admin creates a sandbox with PDF Parallel and Help video set to No
+    When admin creates a sandbox activity using "sandbox_create_no"
+    Then the sandbox activity is created and visible to admin
+    And the sandbox saved settings match "sandbox_create_no"
+
+  @SB-create-6
+  Scenario: Admin creates a sandbox with description from Git URL
+    When admin creates a sandbox activity using "sandbox_desc_git"
+    Then the sandbox activity is created and visible to admin
+    And the sandbox saved settings match "sandbox_desc_git"
+
+  @SB-create-7
+  Scenario: Create is rejected when the sandbox activity name is missing
+    When admin tries to create a sandbox activity using "sandbox_missing_name"
+    Then the sandbox activity is not created and a validation error is shown
+
+  @SB-create-8
+  Scenario: Create is rejected when the sandbox lab template is missing
+    When admin tries to create a sandbox activity using "sandbox_missing_template"
+    Then the sandbox activity is not created and a validation error is shown
+
+  @SB-create-9
+  Scenario: Student cannot create a sandbox activity
+    When an enrolled student opens the sandbox suite course
+    Then the student cannot add a Lab activity on the sandbox suite course
+
+  @SB-create-11
+  Scenario: Admin edits an existing sandbox and saved settings persist
+    When admin creates a sandbox activity using "sandbox_create_edit"
+    And admin edits the sandbox activity using "sandbox_edit_update"
+    Then the sandbox activity is created and visible to admin
+    And the sandbox saved settings match "sandbox_edit_update"
+
+  # ========== Manage Labs admin (@SB-manage-*) ==========
+
   @SB-manage-1 @provisioning
   Scenario: Admin syncs Start complete then stops the student-started lab
     When admin creates a sandbox activity using "sandbox_user_lab"
@@ -37,7 +107,6 @@ Feature: Sandbox Manage Labs admin actions
     And admin syncs lab status until Stop is completed
     Then the Manage Labs admin stop flow has completed successfully
 
-  # 2) Student Stop; admin only Syncs until Stop complete
   @SB-manage-2 @provisioning
   Scenario: Admin syncs Stop complete after the student stops from the console
     When admin creates a sandbox activity using "sandbox_user_lab"
@@ -50,7 +119,6 @@ Feature: Sandbox Manage Labs admin actions
     And admin syncs lab status until Stop is completed
     Then the Manage Labs admin stop flow has completed successfully
 
-  # 3) Create from No labs → user leaves No labs and appears Active (Create complete)
   @SB-manage-3 @provisioning
   Scenario: Admin creates a lab from No labs and user moves to Active labs
     When admin creates a sandbox activity using "sandbox_user_lab"
@@ -60,7 +128,6 @@ Feature: Sandbox Manage Labs admin actions
     Then that student is not listed on the No labs tab
     And that student appears on Active labs with Create completed
 
-  # 4) No labs membership = enrolled without a lab (excludes unenrolled + users with labs)
   @SB-manage-4 @provisioning
   Scenario: No labs lists only enrolled users who do not already have a lab
     When admin creates a sandbox activity using "sandbox_user_lab"
@@ -68,7 +135,6 @@ Feature: Sandbox Manage Labs admin actions
     When admin opens Manage Labs No labs tab
     Then the No labs list matches the expected enrolled users without labs exactly
 
-  # 5) Pagination on No labs — 3 users + page size 1 (no large seed set)
   @SB-manage-5
   Scenario: No labs pagination navigates between pages
     When admin creates a sandbox activity using "sandbox_user_lab"
@@ -76,7 +142,6 @@ Feature: Sandbox Manage Labs admin actions
     When admin opens Manage Labs No labs tab
     Then No labs pagination can move to the next page and back
 
-  # 6) Search by email on No labs
   @SB-manage-6
   Scenario: No labs search by email filters the list
     When admin creates a sandbox activity using "sandbox_user_lab"
@@ -85,7 +150,6 @@ Feature: Sandbox Manage Labs admin actions
     And admin searches No labs by that student email
     Then No labs search results show only that student email
 
-  # 7) Confirmed green path (same as #2): student Stop + admin Sync Stop.
   @SB-manage-7 @provisioning
   Scenario: Student stop then admin Sync confirms Stop completed
     When admin creates a sandbox activity using "sandbox_user_lab"
@@ -98,21 +162,16 @@ Feature: Sandbox Manage Labs admin actions
     And admin syncs lab status until Stop is completed
     Then the Manage Labs admin stop flow has completed successfully
 
-  # ---- Gap-fill admin Manage Labs (@SB-manage-8+) ----
-
-  # 4 cloud deletes in parallel browsers, then one shared Deleted wait (~8 min not ~32).
-  # Covers single delete + student message (@SB-manage-8), two-lab delete (@SB-manage-14),
-  # and create-after-delete (@SB-manage-19).
-  @SB-manage-8 @provisioning
-  Scenario: Four labs are deleted in parallel then one is recreated
+  @SB-manage-8 @provisioning @fresh_activity
+  Scenario: Four labs are bulk deleted on Active labs then one is recreated
     When admin creates a sandbox activity using "sandbox_user_lab"
     Given 4 Active labs ready for parallel delete
     When admin deletes those 4 labs from parallel browsers
     Then those labs are Deleted after one shared wait
     When the student opens the sandbox activity after the lab was deleted
-    Then the student sees the lab is deleted message
+    Then the student sees the lab is deleted message on the sandbox console
     When admin creates a replacement lab for the post-delete student
-    Then that student appears on Active labs with Create completed
+    Then that user sandbox lab console shows the lab is loading
 
   @SB-manage-9 @provisioning
   Scenario: Admin restarts a Stopped lab with Start and Syncs Start complete
@@ -133,10 +192,9 @@ Feature: Sandbox Manage Labs admin actions
     And admin searches Active labs by that student email
     Then Active labs search results show that student email
 
-  @SB-manage-11 @provisioning
-  Scenario: Active labs pagination navigates between pages with 2 users
+  @SB-manage-11
+  Scenario: Active labs pagination navigates forward and back
     When admin creates a sandbox activity using "sandbox_user_lab"
-    Given 2 Manage Labs users with Active labs for pagination
     When admin opens Manage Labs Active labs tab
     Then Active labs pagination can move to the next page and back
 
@@ -147,21 +205,19 @@ Feature: Sandbox Manage Labs admin actions
     When admin bulk creates labs for those users from No labs
     Then those users appear on Active labs with Create completed
 
-  @SB-manage-13 @provisioning
-  Scenario: Bulk Start restarts 2 Stopped labs
+  @SB-manage-13 @SB-manage-24 @provisioning @fresh_activity
+  Scenario: Bulk Stop then Start on two fresh labs from No labs
     When admin creates a sandbox activity using "sandbox_user_lab"
-    Given 2 Manage Labs users with Stopped labs
-    When admin bulk starts those labs from Manage Labs
+    Given 2 enrolled Manage Labs users without labs
+    When admin bulk creates labs for those users from No labs
+    Then those users appear on Active labs with Create completed
+    When admin bulk stops those prepared labs from Manage Labs
+    And admin waits 30 seconds for lab operations
+    And admin syncs those labs until Stop is completed
+    Then those prepared labs are Stopped on Active labs
+    When admin bulk starts those prepared labs from Manage Labs
     And admin syncs those labs until Start is completed
     Then those labs are Running
-
-  @SB-manage-24 @provisioning
-  Scenario: Bulk Stop stops 2 running labs
-    When admin creates a sandbox activity using "sandbox_user_lab"
-    Given 2 Manage Labs users with Active labs for pagination
-    When admin bulk stops those labs from Manage Labs
-    And admin syncs those labs until Stop is completed
-    Then those labs are Stopped
 
   @SB-manage-15
   Scenario: Manage Labs actions stay gated with no row selected
@@ -227,12 +283,9 @@ Feature: Sandbox Manage Labs admin actions
     And per-lab action controls are available
     And the not-created users tab offers Create but not lab actions
 
-  # ---- Admin report + prevent double Start/Create ----
-
-  @SB-manage-25
+  @SB-manage-25 @LT-67 @easybatch2
   Scenario: CloudLabs course progress report loads with lab activity columns
-    When admin creates a sandbox activity using "sandbox_user_lab"
-    Given Manage Labs section is ready for admin UI checks
+    Given an existing sandbox activity is available on the suite course
     When admin opens the CloudLabs course progress report
     Then the report loads without errors
     And the report lists courses with lab activity columns

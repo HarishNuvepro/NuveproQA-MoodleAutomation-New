@@ -1,8 +1,13 @@
 package com.nuvepro.moodle.pages;
 
+import com.microsoft.playwright.Download;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.LoadState;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -46,6 +51,8 @@ public class ManageLabs extends BasePage {
                     + ".tab-pane#labnotcreatedusers .fixed-table-pagination, "
                     + ".tab-pane.active .fixed-table-pagination, "
                     + ".bootstrap-table .fixed-table-pagination";
+    /** Active labs tab pane — scope toolbar clicks here (avoid report / My labs dropdown). */
+    public static final String CREATED_PANE = "#labcreatedusers";
     public static final String CREATED_TABLE = "#np-ap-manage-lab-table";
     public static final String CREATED_SEARCH =
             "#np-ap-manage-lab-table .fixed-table-toolbar .search input, "
@@ -54,6 +61,11 @@ public class ManageLabs extends BasePage {
                     + ".tab-pane.active .fixed-table-toolbar .search input";
     public static final String GROUP_FILTER = "#course_groups";
     public static final String REPORT_DROPDOWN = "#np-ap-cl-manage-active-labs-actions";
+    public static final String ACTIVE_LABS_REPORT_DOWNLOAD = "#np-ap-manage-active-labs-report-btn";
+    public static final String ACTIVE_LABS_REPORT_MODAL = "#downloadManageActiveLabsReport";
+    /** Confirm button inside the Active labs download modal (not the toolbar Download item). */
+    public static final String ACTIVE_LABS_REPORT_MODAL_DOWNLOAD_BTN =
+            "#downloadReportBtn, button#downloadReportBtn, .modal-footer .btn-primary";
     public static final String EXPORT_BTNS =
             "#np-ap-manage-export-report-btn, "
                     + "#np-ap-cl-manage-active-labs-actions, "
@@ -90,6 +102,130 @@ public class ManageLabs extends BasePage {
         }
     }
 
+    /** Active labs tab: show all rows on one page, then check the header “select all” (bootstrap-table). */
+    public void selectAllCreatedLabRows() {
+        openCreatedTab();
+        clearCreatedSearch();
+        setCreatedPageSize("25");
+        refreshCreatedTable();
+        page.waitForTimeout(800);
+        boolean checkAll = false;
+        try {
+            Object ok = page.evaluate("""
+                    () => {
+                      const jq = window.jQuery || window.$;
+                      if (!jq) return false;
+                      const $t = jq('#np-ap-manage-lab-table');
+                      if ($t.length && $t.bootstrapTable) {
+                        $t.bootstrapTable('checkAll');
+                        return true;
+                      }
+                      return false;
+                    }
+                    """);
+            checkAll = Boolean.TRUE.equals(ok) || "true".equals(String.valueOf(ok));
+        } catch (RuntimeException ignored) {}
+        if (!checkAll) {
+            Locator header = page.locator(
+                    "#np-ap-manage-lab-table thead input[name='btSelectAll'], "
+                            + "#np-ap-manage-lab-table thead .bs-checkbox input");
+            if (header.count() > 0) {
+                try {
+                    header.first().check();
+                } catch (RuntimeException ignored) {}
+            }
+        }
+        int total = rowCount();
+        int checked = page.locator(ROW_CHECKBOX + ":checked").count();
+        if (total > 0 && checked < total) {
+            selectAllRows();
+            checked = page.locator(ROW_CHECKBOX + ":checked").count();
+        }
+        System.out.println("[ManageLabs] Active labs select-all checked=" + checked + " of " + total);
+    }
+
+    /** Select all visible Active lab rows and click Sync Status (no Actions dropdown). */
+    public void syncAllSelectedCreatedLabs() {
+        page.waitForTimeout(400);
+        clickSyncStatusButton();
+        page.waitForTimeout(1_000);
+    }
+
+    /** Sync Status toolbar button only — not Actions / report (My labs) dropdown. */
+    public void clickSyncStatusButton() {
+        dismissOpenDropdowns();
+        Locator sync = visibleCreatedToolbarControl(SYNC_BTN);
+        sync.click(new Locator.ClickOptions().setForce(true));
+    }
+
+    /** Active labs: select these users, then Sync Status once. */
+    public void syncCreatedRowsForEmails(java.util.List<String> emails, int sectionId) {
+        open(sectionId);
+        openCreatedTab();
+        selectRowsForEmails(emails);
+        syncAllSelectedCreatedLabs();
+    }
+
+    /** Select all visible Active lab rows and Delete via the Actions dropdown. */
+    public void deleteAllSelectedCreatedLabs() {
+        performActionOnSelection(DELETE);
+    }
+
+    /** Active labs: Start on the current checkbox selection (Actions dropdown, not My labs report). */
+    public void startSelectedCreatedLabs(int minimumChecked) {
+        performCreatedTabLabAction(START, minimumChecked);
+    }
+
+    /** Active labs: Stop on the current checkbox selection. */
+    public void stopSelectedCreatedLabs(int minimumChecked) {
+        performCreatedTabLabAction(STOP, minimumChecked);
+    }
+
+    public int countCheckedCreatedRows() {
+        return page.locator(CREATED_TABLE + " tbody input[name='btSelectItem']:checked").count();
+    }
+
+    /** Clear Active labs row selection (bootstrap-table + DOM checkboxes). */
+    public void uncheckAllCreatedLabRows() {
+        openCreatedTab();
+        try {
+            page.evaluate("""
+                    () => {
+                      const jq = window.jQuery || window.$;
+                      if (!jq) return;
+                      const $t = jq('#np-ap-manage-lab-table');
+                      if ($t.length && $t.bootstrapTable) $t.bootstrapTable('uncheckAll');
+                    }
+                    """);
+        } catch (RuntimeException ignored) {}
+        Locator boxes = page.locator(CREATED_TABLE + " tbody input[name='btSelectItem']:checked");
+        for (int i = boxes.count() - 1; i >= 0; i--) {
+            try {
+                boxes.nth(i).uncheck();
+            } catch (RuntimeException ignored) {}
+        }
+        page.waitForTimeout(400);
+    }
+
+    /** Poll until the Actions dropdown is enabled (selection registered by manage-labs.js). */
+    public void waitForCreatedLabActionToolbarEnabled(int minimumSelected, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            int checked = countCheckedCreatedRows();
+            Locator actions = page.locator(CREATED_PANE + " " + ACTIONS_BTN);
+            boolean actionsEnabled = actions.count() > 0
+                    && actions.first().getAttribute("disabled") == null;
+            if (checked >= minimumSelected && actionsEnabled) {
+                System.out.println("[ManageLabs] toolbar ready checked=" + checked
+                        + " Actions enabled");
+                return;
+            }
+            page.waitForTimeout(400);
+        }
+        throw new IllegalStateException("Active labs toolbar not ready (need " + minimumSelected
+                + " selected + Actions enabled) checked=" + countCheckedCreatedRows());
+    }
+
     /** First row's text (Lab ID | email | Action | Status | ...) for state assertions. */
     public String firstRowText() {
         Locator row = page.locator("#np-ap-manage-lab-table tbody tr").first();
@@ -111,11 +247,10 @@ public class ManageLabs extends BasePage {
         page.waitForTimeout(1_000); // let the selection event update the toolbar
         boolean inDropdown = START.equals(itemSelector) || STOP.equals(itemSelector) || DELETE.equals(itemSelector);
         if (inDropdown) {
-            page.locator(ACTIONS_BTN).click();
-            page.waitForTimeout(400);
+            performCreatedTabLabAction(itemSelector, 1);
+            return;
         }
         page.locator(itemSelector).click(new Locator.ClickOptions().setForce(true));
-        // Start/Stop/Delete/Create raise a Moodle confirm; Sync Status fires immediately (no dialog).
         try {
             confirmModal();
         } catch (Throwable noDialog) {
@@ -290,10 +425,101 @@ public class ManageLabs extends BasePage {
     public void createLabForUserEmail(String email, int sectionId) {
         open(sectionId);
         openNotCreatedTab();
+        clearNotCreatedRowSelection();
         selectNotCreatedUserEmail(email, sectionId);
-        page.waitForTimeout(1_000);
-        page.locator(NOTCREATED_CREATE).click(new Locator.ClickOptions().setForce(true));
-        try { confirmModal(); } catch (Throwable ignored) {}
+        clickNotCreatedCreateButton();
+    }
+
+    /**
+     * One user at a time: select on No labs → Create → verify on Active labs (Create in progress or Running).
+     * Returns lab id when the Active labs row exposes it (may still be blank while Create is in flight).
+     */
+    public String createLabForUserEmailSequentially(String email, int sectionId) {
+        open(sectionId);
+        openNotCreatedTab();
+        clearNotCreatedRowSelection();
+        selectNotCreatedUserEmail(email, sectionId);
+        clickNotCreatedCreateButton();
+        return waitForActiveLabRowAfterCreate(email, sectionId);
+    }
+
+    private void clickNotCreatedCreateButton() {
+        page.waitForTimeout(800);
+        Locator createBtn = page.locator(NOTCREATED_CREATE);
+        if (createBtn.count() == 0) {
+            throw new IllegalStateException("No labs Create button not found (" + NOTCREATED_CREATE + ")");
+        }
+        String disabled = createBtn.first().getAttribute("disabled");
+        String aria = createBtn.first().getAttribute("aria-disabled");
+        if (disabled != null || "true".equalsIgnoreCase(aria)) {
+            throw new IllegalStateException("No labs Create button disabled — no row selected?");
+        }
+        createBtn.first().click(new Locator.ClickOptions().setForce(true));
+        try {
+            confirmModal();
+        } catch (Throwable ignored) {}
+        page.waitForTimeout(1_200);
+        System.out.println("[ManageLabs] No labs Create clicked for selection on " + page.url());
+    }
+
+    /** Uncheck all rows on the No labs tab so each sequential Create targets one user. */
+    public void clearNotCreatedRowSelection() {
+        try {
+            page.evaluate("""
+                    () => {
+                      const jq = window.jQuery || window.$;
+                      if (!jq) return;
+                      const $t = jq('#labnotcreatedusers table');
+                      if ($t.length && $t.bootstrapTable) $t.bootstrapTable('uncheckAll');
+                    }
+                    """);
+        } catch (RuntimeException ignored) {}
+        Locator checked = page.locator(NOTCREATED_TABLE + " input[name='btSelectItem']:checked");
+        for (int i = checked.count() - 1; i >= 0; i--) {
+            try {
+                checked.nth(i).uncheck();
+            } catch (RuntimeException ignored) {}
+        }
+    }
+
+    /**
+     * After No labs Create, open Active labs and confirm the user appears with Create in progress
+     * (or already Running when the provider is fast).
+     */
+    public String waitForActiveLabRowAfterCreate(String email, int sectionId) {
+        if (email == null || email.isBlank()) {
+            throw new IllegalArgumentException("email required");
+        }
+        String lastRow = "";
+        for (int attempt = 1; attempt <= 16; attempt++) {
+            open(sectionId);
+            openCreatedTab();
+            clearCreatedSearch();
+            try {
+                searchCreatedByEmail(email);
+            } catch (RuntimeException ignored) {}
+            if (!createdContainsEmail(email)) {
+                if (attempt % 4 == 0) refreshCreatedTable();
+                page.waitForTimeout(1_500);
+                continue;
+            }
+            lastRow = createdRowTextForEmail(email);
+            LabState st = stateForEmail(email);
+            String lower = lastRow.toLowerCase(java.util.Locale.ROOT);
+            boolean createOk = st == LabState.INPROGRESS || st == LabState.RUNNING
+                    || (lower.contains("create") && (lower.contains("progress")
+                    || lower.contains("inprogress") || lower.contains("pending")
+                    || lower.contains("complete")));
+            if (createOk) {
+                String id = labIdForEmail(email);
+                System.out.println("[ManageLabs] Active labs OK after Create email=" + email
+                        + " state=" + st + " labId=" + id + " row=" + lastRow);
+                return id;
+            }
+            page.waitForTimeout(1_500);
+        }
+        throw new IllegalStateException("Active labs did not show Create in progress for " + email
+                + " (last row='" + lastRow + "')");
     }
 
     /**
@@ -301,11 +527,15 @@ public class ManageLabs extends BasePage {
      * Retries with reload because enrolments can lag a few seconds.
      */
     public void selectNotCreatedUserEmail(String email, int sectionId) {
+        selectNotCreatedUserEmail(email, sectionId, 8, 2_500);
+    }
+
+    public void selectNotCreatedUserEmail(String email, int sectionId, int maxAttempts, int retryMs) {
         if (email == null || email.isBlank()) {
             throw new IllegalArgumentException("email required");
         }
         String username = email.contains("@") ? email.substring(0, email.indexOf('@')) : email;
-        for (int attempt = 1; attempt <= 8; attempt++) {
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             open(sectionId);
             openNotCreatedTab();
             // 1) Search by full email (manage-6 proven path)
@@ -348,9 +578,69 @@ public class ManageLabs extends BasePage {
             } catch (RuntimeException ignored) {}
             System.out.println("[ManageLabs] No labs user not visible yet (attempt " + attempt
                     + "): " + email);
-            page.waitForTimeout(2_500);
+            page.waitForTimeout(retryMs);
         }
         throw new IllegalStateException("user not found in not-created list: " + email);
+    }
+
+    /**
+     * Recreate after admin Delete: the user stays on <strong>Active labs</strong> with Delete/Complete
+     * (not on No labs). Select that row and click the toolbar Create button.
+     */
+    public void recreateLabForUserOnActiveLabs(String email, int sectionId) {
+        if (email == null || email.isBlank()) {
+            throw new IllegalArgumentException("email required");
+        }
+        open(sectionId);
+        openCreatedTab();
+        setCreatedPageSize("25");
+        clearCreatedSearch();
+        try {
+            searchCreatedByEmail(email);
+        } catch (RuntimeException ignored) {}
+        if (!createdContainsEmail(email)) {
+            goToCreatedFirstPageIfPresent();
+            for (int p = 0; p < 40 && !createdContainsEmail(email); p++) {
+                if (!clickCreatedNextPage()) break;
+            }
+        }
+        if (!createdContainsEmail(email)) {
+            throw new IllegalStateException("no Active labs row for recreate: " + email);
+        }
+        Locator row = createdRowForEmail(email);
+        Locator cb = row.first().locator("input[name='btSelectItem']");
+        if (!cb.isChecked()) {
+            cb.check();
+        }
+        page.waitForTimeout(1_000);
+        Locator createBtn = page.locator(CREATE);
+        if (createBtn.count() == 0) {
+            throw new IllegalStateException("Active labs Create button missing (" + CREATE + ")");
+        }
+        if (actionDisabled(CREATE)) {
+            throw new IllegalStateException("Active labs Create disabled — select the deleted row first");
+        }
+        createBtn.first().click(new Locator.ClickOptions().setForce(true));
+        try {
+            confirmModal();
+        } catch (Throwable ignored) {}
+        page.waitForTimeout(1_200);
+        System.out.println("[ManageLabs] Active labs Create (recreate after Delete) email=" + email);
+    }
+
+    /** Post-delete recreate: Active labs first; No labs only if the user never had a row. */
+    public void createLabForUserEmailQuick(String email, int sectionId) {
+        try {
+            recreateLabForUserOnActiveLabs(email, sectionId);
+        } catch (RuntimeException activeFail) {
+            System.out.println("[ManageLabs] Active labs recreate failed, trying No labs: "
+                    + activeFail.getMessage());
+            open(sectionId);
+            openNotCreatedTab();
+            clearNotCreatedRowSelection();
+            selectNotCreatedUserEmail(email, sectionId, 4, 1_500);
+            clickNotCreatedCreateButton();
+        }
     }
 
     public void openCreatedTab() {
@@ -724,6 +1014,20 @@ public class ManageLabs extends BasePage {
         return new java.util.ArrayList<>(out);
     }
 
+    /** Collect user emails across all Active labs pages (pagination). */
+    public java.util.Set<String> allCreatedEmails() {
+        java.util.LinkedHashSet<String> all = new java.util.LinkedHashSet<>();
+        openCreatedTab();
+        clearCreatedSearch();
+        goToCreatedFirstPage();
+        for (int pageNum = 0; pageNum < 50; pageNum++) {
+            all.addAll(createdEmailsOnCurrentPage());
+            if (!clickCreatedNextPage()) break;
+        }
+        goToCreatedFirstPage();
+        return all;
+    }
+
     public boolean hasCreatedPagination() {
         return createdNextEnabled() || createdHasPageNumber(2);
     }
@@ -886,29 +1190,261 @@ public class ManageLabs extends BasePage {
         throw new IllegalStateException("user not found for multi-select Create: " + email);
     }
 
-    public boolean reportExportAvailable() {
-        Locator cands = page.locator(EXPORT_BTNS + ", " + REPORT_DROPDOWN);
-        for (int i = 0; i < cands.count(); i++) {
-            try {
-                if (cands.nth(i).isVisible()) return true;
-            } catch (RuntimeException ignored) {}
+    /**
+     * Active labs: Reports → Download (menu) → Download (modal) and verify a file is saved.
+     */
+    public boolean exerciseActiveLabsReportExport() {
+        openActiveLabsReportDownloadModal();
+        Path saved = confirmActiveLabsReportDownloadModal();
+        if (saved == null) {
+            return false;
         }
-        String body = page.locator("body").innerText().toLowerCase();
-        return body.contains("export") || body.contains("download report") || body.contains("report");
+        try {
+            long bytes = Files.size(saved);
+            System.out.println("[ManageLabs] Active labs report saved " + saved.getFileName()
+                    + " (" + bytes + " bytes)");
+            return bytes > 0;
+        } catch (IOException | RuntimeException e) {
+            System.out.println("[ManageLabs] Active labs report save check failed: " + e.getMessage());
+            return false;
+        } finally {
+            dismissActiveLabsReportModal();
+        }
     }
 
-    public boolean columnToggleAvailable() {
-        Locator cands = page.locator(COLUMNS_TOGGLE);
-        for (int i = 0; i < cands.count(); i++) {
+    /** Open Reports dropdown and choose Download to show the modal. */
+    public void openActiveLabsReportDownloadModal() {
+        openCreatedTab();
+        page.waitForTimeout(600);
+        dismissOpenDropdowns();
+        Locator toggle = visibleCreatedToolbarControl(REPORT_DROPDOWN);
+        toggle.scrollIntoViewIfNeeded();
+        toggle.click();
+        page.waitForTimeout(500);
+        Locator openMenu = page.locator(
+                CREATED_PANE + " .dropdown.show .dropdown-menu, "
+                        + CREATED_PANE + " .dropdown-menu.show");
+        try {
+            openMenu.first().waitFor(new Locator.WaitForOptions().setTimeout(8_000));
+        } catch (RuntimeException notOpen) {
+            toggle.click(new Locator.ClickOptions().setForce(true));
+            page.waitForTimeout(500);
+        }
+        if (!clickActiveLabsReportDownloadItem()) {
             try {
-                if (cands.nth(i).isVisible()) {
-                    cands.nth(i).click();
-                    page.waitForTimeout(500);
+                page.evaluate("""
+                        () => {
+                          const pane = document.querySelector('#labcreatedusers');
+                          const toggle = pane && pane.querySelector('#np-ap-cl-manage-active-labs-actions');
+                          if (toggle) toggle.click();
+                          const dl = document.querySelector('#np-ap-manage-active-labs-report-btn');
+                          if (dl) dl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                          return !!(toggle && dl);
+                        }
+                        """);
+            } catch (RuntimeException ignored) {}
+        }
+        for (int i = 0; i < 40; i++) {
+            if (activeLabsReportModalVisible()) return;
+            page.waitForTimeout(250);
+        }
+        throw new IllegalStateException("Active labs download modal did not open");
+    }
+
+    /** Click Download in the modal and wait for the browser download event. */
+    public Path confirmActiveLabsReportDownloadModal() {
+        Locator modal = page.locator(ACTIVE_LABS_REPORT_MODAL + ".show, " + ACTIVE_LABS_REPORT_MODAL);
+        Locator modalBtn = modal.locator(ACTIVE_LABS_REPORT_MODAL_DOWNLOAD_BTN);
+        if (modalBtn.count() == 0) {
+            modalBtn = modal.locator("button, a.btn, input[type=button], input[type=submit]")
+                    .filter(new Locator.FilterOptions().setHasText(
+                            Pattern.compile("^\\s*Download\\b", Pattern.CASE_INSENSITIVE)));
+        }
+        for (int i = 0; i < 40; i++) {
+            if (modalBtn.count() > 0) {
+                try {
+                    if (modalBtn.first().isVisible()) break;
+                } catch (RuntimeException ignored) {}
+            }
+            page.waitForTimeout(250);
+        }
+        if (modalBtn.count() == 0) {
+            System.out.println("[ManageLabs] modal Download button not found in "
+                    + ACTIVE_LABS_REPORT_MODAL);
+            return null;
+        }
+        Locator clickTarget = modalBtn.first();
+        Download download;
+        try {
+            download = page.waitForDownload(new Page.WaitForDownloadOptions().setTimeout(60_000),
+                    () -> clickTarget.click(new Locator.ClickOptions().setForce(true)));
+        } catch (RuntimeException e) {
+            System.out.println("[ManageLabs] waitForDownload failed: " + e.getMessage());
+            return null;
+        }
+        String name = download.suggestedFilename();
+        if (name == null || name.isBlank()) {
+            name = "manage-active-labs-report.csv";
+        }
+        Path dest = Path.of("target", "downloads", "active-labs-" + System.currentTimeMillis() + "-" + name);
+        try {
+            dest.getParent().toFile().mkdirs();
+            download.saveAs(dest);
+            return dest;
+        } catch (RuntimeException e) {
+            System.out.println("[ManageLabs] saveAs failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** @deprecated for assertions — use {@link #exerciseActiveLabsReportExport()}. */
+    public boolean reportExportAvailable() {
+        return exerciseActiveLabsReportExport();
+    }
+
+    private boolean clickActiveLabsReportDownloadItem() {
+        Locator inMenu = page.locator(
+                CREATED_PANE + " .dropdown-menu.show " + ACTIVE_LABS_REPORT_DOWNLOAD + ", "
+                        + CREATED_PANE + " .dropdown.show " + ACTIVE_LABS_REPORT_DOWNLOAD);
+        for (int i = 0; i < inMenu.count(); i++) {
+            try {
+                if (inMenu.nth(i).isVisible()) {
+                    inMenu.nth(i).click(new Locator.ClickOptions().setForce(true));
                     return true;
                 }
             } catch (RuntimeException ignored) {}
         }
+        Locator byText = page.locator(CREATED_PANE + " .dropdown-menu.show a.dropdown-item, "
+                        + CREATED_PANE + " .dropdown.show a.dropdown-item")
+                .filter(new Locator.FilterOptions().setHasText(Pattern.compile("^\\s*Download\\b", Pattern.CASE_INSENSITIVE)));
+        if (byText.count() > 0) {
+            try {
+                byText.first().click(new Locator.ClickOptions().setForce(true));
+                return true;
+            } catch (RuntimeException ignored) {}
+        }
         return false;
+    }
+
+    private boolean activeLabsReportModalVisible() {
+        Locator modal = page.locator(ACTIVE_LABS_REPORT_MODAL);
+        for (int i = 0; i < modal.count(); i++) {
+            try {
+                Locator m = modal.nth(i);
+                if (!m.isVisible()) continue;
+                String cls = m.getAttribute("class");
+                if (cls != null && cls.contains("show")) return true;
+                return true;
+            } catch (RuntimeException ignored) {}
+        }
+        try {
+            Object ok = page.evaluate(
+                    """
+                            (sel) => {
+                              const m = document.querySelector(sel);
+                              if (!m) return false;
+                              return m.classList.contains('show')
+                                  || m.getAttribute('aria-hidden') === 'false'
+                                  || m.getClientRects().length > 0;
+                            }
+                            """,
+                    ACTIVE_LABS_REPORT_MODAL);
+            return Boolean.TRUE.equals(ok) || "true".equals(String.valueOf(ok));
+        } catch (RuntimeException ignored) {}
+        return false;
+    }
+
+    private void dismissActiveLabsReportModal() {
+        try {
+            Locator close = page.locator(ACTIVE_LABS_REPORT_MODAL + " [data-dismiss='modal'], "
+                    + ACTIVE_LABS_REPORT_MODAL + " .btn-secondary");
+            if (close.count() > 0 && close.first().isVisible()) {
+                close.first().click();
+                page.waitForTimeout(400);
+            }
+        } catch (RuntimeException ignored) {}
+        dismissOpenDropdowns();
+    }
+
+    /**
+     * Open the bootstrap-table columns menu and confirm it exposes column choices.
+     */
+    public boolean exerciseColumnToggle() {
+        openCreatedTab();
+        Locator cands = page.locator(COLUMNS_TOGGLE);
+        boolean clicked = false;
+        for (int i = 0; i < cands.count(); i++) {
+            try {
+                if (cands.nth(i).isVisible()) {
+                    cands.nth(i).click();
+                    clicked = true;
+                    break;
+                }
+            } catch (RuntimeException ignored) {}
+        }
+        if (!clicked) {
+            return false;
+        }
+        page.waitForTimeout(400);
+        Locator menu = page.locator(
+                ".fixed-table-toolbar .dropdown-menu.show, "
+                        + ".keep-open .dropdown-menu.show, "
+                        + ".columns .dropdown-menu.show");
+        for (int attempt = 0; attempt < 24; attempt++) {
+            if (menu.count() > 0) {
+                try {
+                    if (menu.first().isVisible()) {
+                        Locator labels = menu.first().locator("label, li, .dropdown-item");
+                        if (labels.count() >= 2) {
+                            return true;
+                        }
+                        String text = menu.first().innerText().toLowerCase();
+                        if (text.contains("column") || text.contains("email") || text.contains("status")
+                                || text.contains("user") || text.contains("lab")) {
+                            return true;
+                        }
+                    }
+                } catch (RuntimeException ignored) {}
+            }
+            page.waitForTimeout(250);
+        }
+        return false;
+    }
+
+    /** @deprecated use {@link #exerciseColumnToggle()} */
+    public boolean columnToggleAvailable() {
+        return exerciseColumnToggle();
+    }
+
+    /**
+     * Poll for Lab Details content (modal or Moodle modal region).
+     *
+     * @return visible modal/panel text, or {@code null} if nothing appeared in time
+     */
+    public String waitForLabDetailsText(int maxSeconds) {
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            for (String sel : new String[]{
+                    LAB_DETAIL_MODAL,
+                    LAB_DETAIL_MODAL + ".show",
+                    ".modal.show",
+                    "[data-region='modal-container']"
+            }) {
+                Locator modal = page.locator(sel);
+                for (int i = 0; i < modal.count(); i++) {
+                    try {
+                        Locator m = modal.nth(i);
+                        if (!m.isVisible()) continue;
+                        String text = m.innerText();
+                        if (text != null && text.trim().length() > 20) {
+                            return text;
+                        }
+                    } catch (RuntimeException ignored) {}
+                }
+            }
+            page.waitForTimeout(500);
+        }
+        return null;
     }
 
     public boolean groupFilterPresent() {
@@ -928,61 +1464,107 @@ public class ManageLabs extends BasePage {
         openCreatedTab();
         clearCreatedSearch();
         setCreatedPageSize("25");
-        java.util.List<String> indexes = new java.util.ArrayList<>();
-        for (String email : emails) {
-            clearCreatedSearch();
-            searchCreatedByEmail(email);
-            Locator row = createdRowForEmail(email);
-            if (row.count() == 0) {
-                throw new IllegalStateException("no Active labs row for bulk select: " + email);
-            }
-            Locator cb = row.first().locator("input[name='btSelectItem']");
-            String idx = cb.getAttribute("data-index");
-            if (idx == null || idx.isBlank()) idx = cb.getAttribute("value");
-            if (idx != null && !idx.isBlank()) indexes.add(idx.trim());
-            if (!cb.isChecked()) cb.check();
+        goToCreatedFirstPageIfPresent();
+        uncheckAllCreatedLabRows();
+        if (!checkCreatedRowsByEmailViaBootstrapTable(emails)) {
+            checkCreatedRowsByEmailViaDom(emails);
         }
         clearCreatedSearch();
-        page.waitForTimeout(1_000);
+        page.waitForTimeout(800);
         waitForCreatedRowsOrEmpty();
-        for (String idx : indexes) {
-            Locator byIdx = page.locator(
-                    "#np-ap-manage-lab-table input[name='btSelectItem'][data-index='" + idx + "'], "
-                            + "#np-ap-manage-lab-table input[name='btSelectItem'][value='" + idx + "']");
-            if (byIdx.count() > 0) {
-                if (!byIdx.first().isChecked()) byIdx.first().check();
-                continue;
-            }
-            try {
-                page.evaluate("i => { const $t = $('#np-ap-manage-lab-table'); "
-                        + "if ($t.length && $t.bootstrapTable) $t.bootstrapTable('check', parseInt(i, 10)); }",
-                        idx);
-            } catch (RuntimeException ignored) {}
+        int checked = countCheckedCreatedRows();
+        System.out.println("[ManageLabs] selectRowsForEmails checked=" + checked + " of " + emails.size());
+        if (checked != emails.size()) {
+            uncheckAllCreatedLabRows();
+            checkCreatedRowsByEmailViaDom(emails);
+            checked = countCheckedCreatedRows();
+            System.out.println("[ManageLabs] selectRowsForEmails DOM fallback checked=" + checked);
         }
-        // Fallback: page through and check any still missing.
-        for (String email : emails) {
-            if (createdContainsEmail(email)) {
-                Locator row = createdRowForEmail(email);
-                if (row.count() > 0) {
-                    Locator cb = row.first().locator("input[name='btSelectItem']");
-                    if (!cb.isChecked()) cb.check();
-                }
-                continue;
+        if (checked != emails.size()) {
+            throw new IllegalStateException("expected " + emails.size()
+                    + " Active lab rows selected, got " + checked);
+        }
+        waitForCreatedLabActionToolbarEnabled(emails.size(), 15_000);
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean checkCreatedRowsByEmailViaBootstrapTable(java.util.List<String> emails) {
+        try {
+            Object raw = page.evaluate(
+                    """
+                            (want) => {
+                              const jq = window.jQuery || window.$;
+                              if (!jq) return { ok: false, reason: 'no-jquery' };
+                              const $t = jq('#np-ap-manage-lab-table');
+                              if (!$t.length || !$t.bootstrapTable) return { ok: false, reason: 'no-table' };
+                              $t.bootstrapTable('uncheckAll');
+                              const targets = want.map(e => String(e).toLowerCase());
+                              let matched = 0;
+                              document.querySelectorAll('#np-ap-manage-lab-table tbody tr').forEach(tr => {
+                                const text = (tr.innerText || '').toLowerCase();
+                                for (const e of targets) {
+                                  if (!text.includes(e)) continue;
+                                  const idx = tr.getAttribute('data-index');
+                                  if (idx == null) continue;
+                                  $t.bootstrapTable('check', parseInt(idx, 10));
+                                  matched++;
+                                  break;
+                                }
+                              });
+                              return { ok: true, matched, want: targets.length };
+                            }
+                            """,
+                    emails);
+            if (raw instanceof Map<?, ?> m) {
+                Object matched = m.get("matched");
+                Object want = m.get("want");
+                int mCount = matched instanceof Number ? ((Number) matched).intValue() : 0;
+                int wCount = want instanceof Number ? ((Number) want).intValue() : emails.size();
+                System.out.println("[ManageLabs] bootstrapTable check matched=" + mCount + " want=" + wCount);
+                page.waitForTimeout(600);
+                return mCount >= wCount;
             }
-            clearCreatedSearch();
-            goToCreatedFirstPageIfPresent();
+        } catch (RuntimeException e) {
+            System.out.println("[ManageLabs] bootstrapTable check failed: " + e.getMessage());
+        }
+        return false;
+    }
+
+    private void checkCreatedRowsByEmailViaDom(java.util.List<String> emails) {
+        clearCreatedSearch();
+        setCreatedPageSize("25");
+        goToCreatedFirstPageIfPresent();
+        for (String email : emails) {
             boolean found = false;
             for (int p = 0; p < 40; p++) {
-                if (createdContainsEmail(email)) {
-                    Locator cb = createdRowForEmail(email).first().locator("input[name='btSelectItem']");
-                    if (!cb.isChecked()) cb.check();
+                Locator row = createdRowForEmail(email);
+                if (row.count() > 0) {
+                    row.first().locator("input[name='btSelectItem']")
+                            .check(new Locator.CheckOptions().setForce(true));
+                    page.waitForTimeout(300);
                     found = true;
                     break;
                 }
                 if (!clickCreatedNextPage()) break;
             }
-            if (!found) throw new IllegalStateException("could not select Active row: " + email);
+            if (!found) {
+                clearCreatedSearch();
+                searchCreatedByEmail(email);
+                Locator row = createdRowForEmail(email);
+                if (row.count() == 0) {
+                    throw new IllegalStateException("no Active labs row for bulk select: " + email);
+                }
+                row.first().locator("input[name='btSelectItem']")
+                        .check(new Locator.CheckOptions().setForce(true));
+                clearCreatedSearch();
+                page.waitForTimeout(500);
+            }
         }
+    }
+
+    /** Jump to page 1 on the Active labs bootstrap-table (for pagination tests). */
+    public void goToCreatedFirstPage() {
+        goToCreatedFirstPageIfPresent();
     }
 
     private void goToCreatedFirstPageIfPresent() {
@@ -1004,14 +1586,108 @@ public class ManageLabs extends BasePage {
 
     /** Perform an action on the CURRENT multi-row selection (open Actions dropdown, click, confirm). */
     public void performActionOnSelection(String itemSelector) {
-        page.waitForTimeout(1_000);
         boolean inDropdown = START.equals(itemSelector) || STOP.equals(itemSelector) || DELETE.equals(itemSelector);
         if (inDropdown) {
-            page.locator(ACTIONS_BTN).click();
-            page.waitForTimeout(400);
+            performCreatedTabLabAction(itemSelector, 1);
+            return;
         }
-        page.locator(itemSelector).click(new Locator.ClickOptions().setForce(true));
-        try { confirmModal(); } catch (Throwable ignored) {}
+        page.waitForTimeout(400);
+        page.locator(itemSelector).first().click(new Locator.ClickOptions().setForce(true));
+    }
+
+    /**
+     * Start/Stop/Delete on the current Active-labs selection. Clicks only the lab Actions control
+     * inside {@link #CREATED_PANE} — never {@link #REPORT_DROPDOWN} (My labs).
+     */
+    private void performCreatedTabLabAction(String itemSelector, int minimumChecked) {
+        openCreatedTab();
+        page.waitForTimeout(800);
+        waitForCreatedLabActionToolbarEnabled(minimumChecked, 20_000);
+        Locator actions = visibleCreatedToolbarControl(ACTIONS_BTN);
+        if (actions.getAttribute("disabled") != null) {
+            throw new IllegalStateException("Actions dropdown still disabled before " + itemSelector);
+        }
+        actions.click();
+        page.locator(CREATED_PANE + " .dropdown-menu.show").first()
+                .waitFor(new Locator.WaitForOptions().setTimeout(8_000));
+        if (!clickLabActionMenuItemViaDom(itemSelector)) {
+            Locator menuItem = visibleLabActionMenuItem(itemSelector);
+            if (menuItem == null) {
+                throw new IllegalStateException("lab action menu item not visible: " + itemSelector);
+            }
+            menuItem.click(new Locator.ClickOptions().setForce(true));
+        }
+        confirmModal();
+        page.waitForTimeout(800);
+        refreshCreatedTable();
+        dismissOpenDropdowns();
+    }
+
+    /** Prefer a DOM click on the open Actions menu item (works with bootstrap-table selection). */
+    private boolean clickLabActionMenuItemViaDom(String itemSelector) {
+        try {
+            Object ok = page.evaluate(
+                    """
+                            (sel) => {
+                              const pane = document.querySelector('#labcreatedusers');
+                              if (!pane) return false;
+                              const menu = pane.querySelector('.dropdown-menu.show');
+                              const btn = menu ? menu.querySelector(sel) : document.querySelector(sel);
+                              if (!btn) return false;
+                              btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                              return true;
+                            }
+                            """,
+                    itemSelector);
+            return Boolean.TRUE.equals(ok) || "true".equals(String.valueOf(ok));
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private void dismissOpenDropdowns() {
+        try {
+            page.keyboard().press("Escape");
+            page.waitForTimeout(200);
+        } catch (RuntimeException ignored) {}
+    }
+
+    private Locator visibleCreatedToolbarControl(String selector) {
+        Locator inPane = page.locator(CREATED_PANE + " " + selector);
+        for (int i = 0; i < inPane.count(); i++) {
+            try {
+                if (inPane.nth(i).isVisible()) return inPane.nth(i);
+            } catch (RuntimeException ignored) {}
+        }
+        Locator global = page.locator(selector);
+        for (int i = 0; i < global.count(); i++) {
+            try {
+                Locator el = global.nth(i);
+                if (!el.isVisible()) continue;
+                String id = el.getAttribute("id");
+                if (REPORT_DROPDOWN.substring(1).equals(id)) continue;
+                return el;
+            } catch (RuntimeException ignored) {}
+        }
+        throw new IllegalStateException("toolbar control not visible in Active labs: " + selector);
+    }
+
+    private Locator visibleLabActionMenuItem(String itemSelector) {
+        Locator scoped = page.locator(
+                CREATED_PANE + " .dropdown-menu.show " + itemSelector + ", "
+                        + CREATED_PANE + " .show " + itemSelector);
+        for (int i = 0; i < scoped.count(); i++) {
+            try {
+                if (scoped.nth(i).isVisible()) return scoped.nth(i);
+            } catch (RuntimeException ignored) {}
+        }
+        Locator fallback = page.locator(itemSelector);
+        for (int i = 0; i < fallback.count(); i++) {
+            try {
+                if (fallback.nth(i).isVisible()) return fallback.nth(i);
+            } catch (RuntimeException ignored) {}
+        }
+        return null;
     }
 
     /** Perform Start/Stop/Delete on the created-tab row belonging to {@code email}. */

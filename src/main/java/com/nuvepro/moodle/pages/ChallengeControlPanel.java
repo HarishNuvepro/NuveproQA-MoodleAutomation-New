@@ -22,6 +22,9 @@ public class ChallengeControlPanel extends BasePage {
             + "button:has-text('Start Lab'), a:has-text('Start Lab')";
     public static final String START_ASSESSMENT = ".np-ap-cl-challenge-start, #np-ap-cl-challenge-start, "
             + "button:has-text('Start Assessment'), a:has-text('Start Assessment')";
+    public static final String CONTINUE_ATTEMPT = "#np-ap-cl-attempt-continue, .np-ap-cl-attempt-continue, "
+            + "button:has-text('Continue'), a:has-text('Continue Assessment'), button:has-text('Continue Assessment')";
+    public static final String READ_MORE = "#read-more-btn, a:has-text('Read More'), button:has-text('Read More')";
     public static final String ACTION_INPUT_DLG = "#np-ap-cl-actionInput-dlg";
     public static final String ACTION_INPUT_SUBMIT = "#np-ap-cl-actionInput-action";
     /** Catalog action form injected into the submission modal when the template configures inputs. */
@@ -115,6 +118,70 @@ public class ChallengeControlPanel extends BasePage {
         } catch (Throwable midNavigation) {
             return false;
         }
+    }
+
+    public boolean hasContinueAttemptVisible() {
+        Locator c = page.locator(CONTINUE_ATTEMPT);
+        for (int i = 0; i < c.count(); i++) {
+            try {
+                if (c.nth(i).isVisible()) return true;
+            } catch (RuntimeException ignored) {}
+        }
+        return false;
+    }
+
+    /** Resume an in-progress attempt from the activity landing (sandbox Continue parity). */
+    public void clickContinueAttempt() {
+        Locator c = page.locator(CONTINUE_ATTEMPT);
+        for (int i = 0; i < c.count(); i++) {
+            try {
+                if (c.nth(i).isVisible()) {
+                    c.nth(i).scrollIntoViewIfNeeded();
+                    c.nth(i).click(new Locator.ClickOptions().setForce(true));
+                    page.waitForTimeout(400);
+                    confirmAnyModal();
+                    return;
+                }
+            } catch (RuntimeException ignored) {}
+        }
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Continue")).click();
+        page.waitForTimeout(400);
+        confirmAnyModal();
+    }
+
+    public void openReadMoreOnLanding() {
+        Locator btn = page.locator(READ_MORE);
+        if (btn.count() == 0) {
+            throw new RuntimeException("Read More control is not on the assessment landing");
+        }
+        btn.first().scrollIntoViewIfNeeded();
+        btn.first().click(new Locator.ClickOptions().setForce(true));
+        page.waitForTimeout(800);
+    }
+
+    /** Read More modal body contains both markers (long description datasets). */
+    public boolean readMoreModalContains(String headMarker, String tailMarker) {
+        Locator modal = page.locator("[data-region='modal-container'].show, .modal.show, #readMoreModal");
+        if (modal.count() == 0) {
+            modal = page.locator(".modal-dialog, [role='dialog']");
+        }
+        if (modal.count() == 0) {
+            throw new RuntimeException("Read More modal did not open");
+        }
+        String text = modal.first().innerText();
+        return text.contains(headMarker) && text.contains(tailMarker);
+    }
+
+    /** Click Start Assessment and cancel the proceed dialog (no attempt / lab). */
+    public void startAssessmentThenCancel() {
+        Locator start = page.locator(START_ASSESSMENT);
+        if (start.count() > 0 && start.first().isVisible()) {
+            start.first().click();
+        } else {
+            page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Start Assessment")).click();
+        }
+        page.waitForTimeout(600);
+        cancelModal();
     }
 
     /** Click Start Assessment on the activity landing and confirm the proceed dialog. */

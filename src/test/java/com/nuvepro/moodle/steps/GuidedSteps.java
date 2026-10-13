@@ -7,14 +7,22 @@ import com.microsoft.playwright.Page;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.AutomationCourses;
 import com.nuvepro.moodle.helpers.CloudLabsClient;
+import com.nuvepro.moodle.helpers.FormSubmit;
+import com.nuvepro.moodle.helpers.PracticeProjectFixtures;
+import com.nuvepro.moodle.helpers.BrowserUi;
+import com.nuvepro.moodle.pages.ChallengeActivityForm;
 import com.nuvepro.moodle.pages.GuidedControlPanel;
 import com.nuvepro.moodle.pages.GuidedLanding;
 import com.nuvepro.moodle.pages.ManageLabs;
 import com.nuvepro.moodle.pages.PracticeUserAttemptsPage;
+import com.nuvepro.moodle.pages.PlaygroundControlPanel;
 import com.nuvepro.moodle.pages.UserGuidedProjectsPage;
 
 import java.util.EnumSet;
+import java.util.Locale;
+import java.util.regex.Matcher;
 import io.cucumber.java.After;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
@@ -23,6 +31,7 @@ import org.testng.SkipException;
 
 import java.util.regex.Pattern;
 
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
@@ -45,40 +54,31 @@ public class GuidedSteps {
 
     private int guidedCmid() {
         if (configuredGuidedCmid != null) return configuredGuidedCmid;
-        if (Settings.GUIDED_CMID.isEmpty()) throw new SkipException("GUIDED_CMID not set");
-        return Integer.parseInt(Settings.GUIDED_CMID);
+        return Integer.parseInt(PracticeProjectFixtures.primaryCmid(ctx.page));
     }
 
     @Given("the without-progress Practice Project fixture is configured")
     public void withoutProgressFixtureIsConfigured() {
-        if (Settings.GUIDED_WITHOUT_PROGRESS_CMID.isBlank()) {
-            throw new SkipException("GUIDED_WITHOUT_PROGRESS_CMID not configured");
-        }
-        configuredGuidedCmid = Integer.parseInt(Settings.GUIDED_WITHOUT_PROGRESS_CMID);
+        configuredGuidedCmid = Integer.parseInt(
+                PracticeProjectFixtures.variantCmid(ctx.page, PracticeProjectFixtures.Variant.WITHOUT_PROGRESS));
     }
 
     @Given("the no-stop-button Practice Project fixture is configured")
     public void noStopFixtureIsConfigured() {
-        if (Settings.GUIDED_NO_STOP_CMID.isBlank()) {
-            throw new SkipException("GUIDED_NO_STOP_CMID not configured");
-        }
-        configuredGuidedCmid = Integer.parseInt(Settings.GUIDED_NO_STOP_CMID);
+        configuredGuidedCmid = Integer.parseInt(
+                PracticeProjectFixtures.variantCmid(ctx.page, PracticeProjectFixtures.Variant.NO_STOP));
     }
 
     @Given("the parallel-view Practice Project fixture is configured")
     public void parallelFixtureIsConfigured() {
-        if (Settings.GUIDED_PARALLEL_CMID.isBlank()) {
-            throw new SkipException("GUIDED_PARALLEL_CMID not configured");
-        }
-        configuredGuidedCmid = Integer.parseInt(Settings.GUIDED_PARALLEL_CMID);
+        configuredGuidedCmid = Integer.parseInt(
+                PracticeProjectFixtures.variantCmid(ctx.page, PracticeProjectFixtures.Variant.PARALLEL));
     }
 
     @Given("the timed Practice Project fixture is configured")
     public void timedFixtureIsConfigured() {
-        if (Settings.GUIDED_TIMED_CMID.isBlank()) {
-            throw new SkipException("GUIDED_TIMED_CMID not configured");
-        }
-        configuredGuidedCmid = Integer.parseInt(Settings.GUIDED_TIMED_CMID);
+        configuredGuidedCmid = Integer.parseInt(
+                PracticeProjectFixtures.variantCmid(ctx.page, PracticeProjectFixtures.Variant.TIMED));
     }
 
     @Given("I open the guided activity")
@@ -145,9 +145,10 @@ public class GuidedSteps {
 
     @When("I open a new guided activity form")
     public void iOpenANewGuidedActivityForm() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        String courseId = AutomationCourses.practiceCourseId(ctx.page);
+        if (courseId.isBlank()) throw new SkipException("could not resolve practice suite course");
         ctx.page.navigate(Settings.BASE_URL + "/course/modedit.php?add=cloudlabs&type=&course="
-                        + Settings.COURSE_ID + "&section=0&return=0&sr=0",
+                        + courseId + "&section=0&return=0&sr=0",
                 new Page.NavigateOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
                         .setTimeout(45_000));
         ctx.page.waitForTimeout(2_000);
@@ -194,7 +195,7 @@ public class GuidedSteps {
 
     @When("the student opens the guided activity")
     public void theStudentOpensTheGuidedActivity() {
-        studentCtx = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        studentCtx = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         studentPage = studentCtx.newPage();
         studentPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
@@ -264,23 +265,23 @@ public class GuidedSteps {
 
     @When("admin sets the guided due date before the start date")
     public void adminSetsDueBeforeStart() {
-        ctx.page.navigate(Settings.BASE_URL + "/course/modedit.php?update=" + guidedCmid(),
-                new Page.NavigateOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
-                        .setTimeout(45_000));
-        ctx.page.waitForTimeout(2_000);
-        Locator expand = ctx.page.locator("a.collapseexpand, .collapsible-actions a");
-        if (expand.count() > 0) { try { expand.first().click(); ctx.page.waitForTimeout(600); } catch (Throwable ignored) {} }
-        // enable both dates if they have enable checkboxes
+        ChallengeActivityForm form = new ChallengeActivityForm(ctx.page);
+        form.openEditForm(String.valueOf(guidedCmid()), "guided");
+        ctx.page.waitForTimeout(1_500);
         for (String f : new String[]{"submissionfromdate", "submissionduedate"}) {
             Locator en = ctx.page.locator("#id_" + f + "_enabled");
-            if (en.count() > 0 && !en.first().isChecked()) en.first().check(new Locator.CheckOptions().setForce(true));
+            if (en.count() > 0 && !en.first().isChecked()) {
+                en.first().check(new Locator.CheckOptions().setForce(true));
+            }
         }
-        ctx.page.waitForTimeout(400);
-        // due-year = from-year - 1  => guaranteed due < from
-        String fromYear = ctx.page.locator("#id_submissionfromdate_year").inputValue();
-        ctx.page.selectOption("#id_submissionduedate_year", String.valueOf(Integer.parseInt(fromYear) - 1));
-        ctx.page.locator("#id_submitbutton").click();
-        ctx.page.waitForTimeout(2_500);
+        ctx.page.waitForTimeout(500);
+        Locator fromYear = ctx.page.locator("#id_submissionfromdate_year");
+        fromYear.waitFor(new Locator.WaitForOptions().setState(com.microsoft.playwright.options.WaitForSelectorState.VISIBLE)
+                .setTimeout(30_000));
+        String year = fromYear.inputValue();
+        ctx.page.locator("#id_submissionduedate_year").selectOption(String.valueOf(Integer.parseInt(year) - 1));
+        FormSubmit.andAwaitNewPage(ctx.page, ctx.page.locator("#id_submitbutton"), 30_000);
+        ctx.page.waitForTimeout(1_000);
     }
 
     @Then("the due-date validation error is shown")
@@ -662,6 +663,216 @@ public class GuidedSteps {
             if (waitControlPanel(20)) return;
         }
         throw new AssertionError("the control panel did not open for the new attempt");
+    }
+
+    // ---- Sandbox parity: practice project console (shared cp.php controls) ----
+
+    private PlaygroundControlPanel ppConsole() {
+        assertTrue(studentPage != null, "student session not open");
+        return new PlaygroundControlPanel(studentPage);
+    }
+
+    @When("the student opens the Lab Usage popup on the practice project console")
+    public void ppOpenLabUsage() {
+        Locator btn = studentPage.locator("#openLabUsageBtn");
+        long deadline = System.currentTimeMillis() + 60_000;
+        while (System.currentTimeMillis() < deadline && btn.count() == 0) {
+            studentPage.waitForTimeout(1_000);
+        }
+        if (btn.count() == 0) {
+            throw new SkipException("Lab Usage not enabled on this practice project template");
+        }
+        studentPage.evaluate("""
+                () => {
+                  const fab = document.querySelector('#openLabUsageBtn');
+                  if (fab) { fab.classList.remove('d-none'); fab.click(); }
+                  const popup = document.querySelector('#labUsagePopup');
+                  if (popup) { popup.style.display = 'block'; popup.classList.remove('d-none'); }
+                  document.querySelectorAll('.np-ap-mod-right-cost-container').forEach(el => el.classList.remove('d-none'));
+                }
+                """);
+        studentPage.waitForTimeout(1_000);
+    }
+
+    @When("the student requests the lab cost on the practice project console")
+    public void ppRequestLabCost() {
+        if (studentPage.locator("#getCost").count() == 0) {
+            throw new SkipException("Get-cost control not present on practice project console");
+        }
+        studentPage.evaluate("""
+                () => {
+                  document.querySelectorAll('.np-ap-mod-right-cost-container').forEach(el => el.classList.remove('d-none'));
+                  const btn = document.querySelector('#getCost');
+                  if (btn) { btn.removeAttribute('disabled'); btn.click(); }
+                }
+                """);
+        studentPage.waitForTimeout(6_000);
+    }
+
+    @Then("valid lab cost values are shown on the practice project console")
+    public void ppValidLabCost() {
+        Locator show = studentPage.locator("#showCostUsage");
+        assertTrue(show.count() > 0, "cost usage area not present");
+        String text = show.first().innerText().trim();
+        assertTrue(!text.isEmpty() && Pattern.compile("\\d").matcher(text).find(),
+                "cost usage shows no numeric values: " + text);
+    }
+
+    @When("the student refreshes the practice project lab on the console")
+    public void ppRefreshLab() {
+        Locator btn = studentPage.locator(PlaygroundControlPanel.REFRESH_LAB);
+        for (int i = 0; i < 30 && (btn.count() == 0 || !btn.first().isVisible()); i++) {
+            studentPage.waitForTimeout(1_000);
+        }
+        if (btn.count() == 0 || !btn.first().isVisible()) {
+            throw new SkipException("Refresh not visible on practice project console");
+        }
+        btn.first().click();
+        studentPage.waitForTimeout(3_000);
+    }
+
+    @Then("the practice project lab remains running after refresh")
+    public void ppLabRunningAfterRefresh() {
+        PlaygroundControlPanel panel = ppConsole();
+        if (guidedLabId != null && CloudLabsClient.isConfigured()) {
+            try {
+                CloudLabsClient.SubStatus ss = CloudLabsClient.getStatus(guidedLabId);
+                if (ss != null) {
+                    ManageLabs.LabState st = ManageLabs.classifyActionStatus(ss.action, ss.status);
+                    assertEquals(st, ManageLabs.LabState.RUNNING,
+                            "lab not Running after refresh (action=" + ss.action + " status=" + ss.status + ")");
+                    return;
+                }
+            } catch (CloudLabsClient.UnavailableException e) {
+                System.out.println("[PP-console] CloudLabs unavailable after refresh: " + e.getMessage());
+            }
+        }
+        assertTrue(panel.waitUntilLabLoaded(45), "lab not running on console after refresh");
+    }
+
+    @When("the student saves a practice project lab note {string}")
+    public void ppSaveNote(String text) {
+        Locator notesTab = studentPage.locator(PlaygroundControlPanel.NOTES_TAB);
+        if (notesTab.count() == 0 || !notesTab.first().isVisible()) {
+            throw new SkipException("Notes not enabled on this lab template");
+        }
+        ppConsole().saveNote(text);
+    }
+
+    @Then("the practice project lab note {string} persists after reopening the console")
+    public void ppNotePersists(String text) {
+        new GuidedLanding(studentPage).open(guidedCmid());
+        theStudentStartsTheGuidedProject();
+        assertTrue(scp().waitEnabled(GuidedControlPanel.STOP, 120) || ppConsole().waitUntilLabLoaded(30),
+                "could not reopen practice project console for note check");
+        studentPage.locator(PlaygroundControlPanel.NOTES_TAB).first().click();
+        studentPage.waitForTimeout(800);
+        String val = studentPage.locator(PlaygroundControlPanel.NOTES_TEXTAREA).first().inputValue().trim();
+        assertTrue(val.contains(text.trim()), "note text missing after reopen (got='" + val + "')");
+    }
+
+    @Then("the practice project support link on the console is available")
+    public void ppSupportLink() {
+        String mailto = ppConsole().openSupportMailtoUrl();
+        assertTrue(mailto != null && mailto.toLowerCase(Locale.ROOT).startsWith("mailto:"),
+                "support link did not produce mailto (got=" + mailto + ")");
+    }
+
+    @Then("the practice project console Back button returns to the landing")
+    public void ppConsoleBackToLanding() {
+        Locator back = studentPage.locator(PlaygroundControlPanel.BACK_BTN);
+        assertTrue(back.count() > 0 && back.first().isVisible(), "Back control missing on console");
+        back.first().click();
+        studentPage.waitForTimeout(2_000);
+        assertTrue(new GuidedLanding(studentPage).isLoaded(), "Back did not return to practice project landing");
+    }
+
+    @When("the student opens Access Lab from Jump to Console on the practice project")
+    public void ppAccessLabFromJump() {
+        Locator jump = studentPage.locator("#jumpToConsoleBtn, a:has-text('Jump to Console'), button:has-text('Jump to Console')");
+        assertTrue(jump.count() > 0, "Jump to Console not found");
+        jump.first().click();
+        studentPage.waitForTimeout(2_000);
+        Locator access = studentPage.locator("#launchAccModal a, #launchAccModal button, a:has-text('Access Lab')");
+        assertTrue(access.count() > 0, "Access Lab control not shown after Jump to Console");
+    }
+
+    @Then("the student is redirected to the practice project cloud lab platform")
+    public void ppRedirectedToCloud() {
+        Page popup = studentPage.context().pages().stream()
+                .filter(p -> p != studentPage && !p.url().contains("view.php"))
+                .findFirst().orElse(null);
+        if (popup != null) {
+            assertTrue(popup.url().contains("cloud") || popup.url().contains("lab")
+                            || popup.url().startsWith("http"),
+                    "Access Lab did not open platform (url=" + popup.url() + ")");
+            return;
+        }
+        assertTrue(studentPage.url().contains("cloud") || studentPage.locator(PlaygroundControlPanel.VM_IFRAME).count() > 0,
+                "no cloud redirect or lab iframe after Access Lab");
+    }
+
+    @When("the student clicks Start Practice Project and cancels the confirmation")
+    public void ppCancelStart() {
+        GuidedLanding gl = new GuidedLanding(studentPage);
+        if (!gl.hasStartProjectOnly()) {
+            throw new SkipException("Start Practice Project not shown (attempt already exists)");
+        }
+        gl.startProjectThenCancel();
+    }
+
+    @Then("no practice project lab was created for the student")
+    public void ppNoLabCreated() {
+        studentPage.waitForTimeout(1_500);
+        assertTrue(new GuidedLanding(studentPage).isLoaded(), "should remain on practice project landing");
+        assertFalse(scp().isShown(), "control panel opened despite canceling start");
+    }
+
+    @When("the student opens the Lab Credentials popup on the practice project console")
+    public void ppOpenCredentials() {
+        Locator btn = studentPage.locator("#openAuthBtn");
+        if (btn.count() == 0 || !btn.first().isVisible()) {
+            throw new SkipException("Lab Credentials not enabled on this template");
+        }
+        btn.first().click();
+    }
+
+    @When("the student changes the practice project lab password on the console")
+    public void ppChangePassword() {
+        Locator link = studentPage.locator("#np-ap-mod-set-password-btn");
+        if (link.count() == 0 || !link.first().isVisible()) {
+            throw new SkipException("Change-password option not available");
+        }
+        link.first().click();
+        assertTrue(ppConsole().fillSetCredentialsPassword("AutoTest@12345"),
+                "set-credentials dialog did not expose password fields");
+    }
+
+    @Then("the practice project lab password update is accepted")
+    public void ppPasswordAccepted() {
+        PlaygroundControlPanel panel = ppConsole();
+        if (panel.passwordChangeSuccessVisible()) return;
+        String body = studentPage.locator("body").innerText().toLowerCase(Locale.ROOT);
+        assertFalse(body.contains("exception") || body.contains("error code"),
+                "password update surfaced an error");
+    }
+
+    @Then("allotted consumed and remaining duration on the practice project console match CloudLabs")
+    public void ppDurationMatchesCloudLabs() {
+        if (guidedLabId == null || guidedLabId.isBlank()) {
+            guidedLabId = scp().labId();
+        }
+        assertTrue(guidedLabId != null && !guidedLabId.isBlank(), "no lab id for duration check");
+        String usage = ppConsole().openUsageAndRead();
+        assertTrue(usage != null && usage.matches("(?s).*\\d+.*"),
+                "console usage/duration empty: " + usage);
+        if (!CloudLabsClient.isConfigured()) return;
+        try {
+            String json = CloudLabsClient.getSubscriptionsStatusBody(guidedLabId);
+            assertTrue(json != null && json.length() > 10, "CloudLabs status empty for labId=" + guidedLabId);
+        } catch (CloudLabsClient.UnavailableException e) {
+            System.out.println("[PP-console] CloudLabs unavailable — UI duration only: " + e.getMessage());
+        }
     }
 
     @After("@guidedlab")

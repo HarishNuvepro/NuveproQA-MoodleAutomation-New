@@ -3,9 +3,10 @@
 Two jobs, both needed after any case change:
 
 1. Enforce the module order QA asked for on `Regression_Dashboard`:
-   Users, Upload users, All course page, Sandbox, Assessment. The assessment row
-   is a single row covering BOTH automation suites (activity creation + user
-   functionality) and takes its Total from the Release_Regression_Plan sheet.
+   Users, Upload users, All course page, Sandbox, Assessment, then trailing
+   modules (Practice, Lab Templates, Moodle settings, Cloudlabs integration,
+   Sequential completion, Difficulty, Git URL content). The assessment row is a
+   single row covering BOTH automation suites and takes its Total from the plan.
 
 2. Recompute every formula on `Regression_Dashboard` and
    `Release_Regression_Plan` and write the result back as the formula's cached
@@ -26,8 +27,12 @@ from copy import copy
 from pathlib import Path
 from xml.etree import ElementTree
 
+import collections
+
 import openpyxl
 from openpyxl.utils import quote_sheetname
+
+AUTOMATION_STATUSES = ["Yes", "Partial", "Deviation", "Deferred", "No"]
 
 WORKBOOK = Path("docs/MoodleRegression_Testing_Kiwi new.xlsx")
 STAGING = Path("target/kiwi_dashboard_refresh.xlsx")
@@ -41,6 +46,8 @@ DASH_RUN = {"pass", "fail", "failed", "blocked"}
 PLAN_RUN = DASH_RUN | {"na", "n/a", "not applicable"}
 
 FIRST_ROW = 5
+# Copy cell styles from this module row so new/trailing rows match (#,##0%, borders, etc.).
+DASHBOARD_STYLE_ROW = 12
 # Module rows in the order QA wants them, as (sheet name, dashboard label).
 MODULES = [
     ("Moodle_users", "Moodle_users"),
@@ -57,6 +64,12 @@ TRAILING_MODULES = [
     ("Practice_Project", "Practice_Project"),
     ("Moodle_Lab_Templates", "Moodle_Lab_Templates"),
     ("Moodle settings", "Moodle settings"),
+    ("Moodle-Cloudlabs Integration", "Moodle-Cloudlabs Integration"),
+    ("Sequential_Activity_Completion", "Sequential_Activity_Completion"),
+    ("Difficulty_Level_Configuration", "Difficulty_Level_Configuration"),
+    ("Content_Integration_Git_URL", "Content_Integration_Git_URL"),
+    ("My_Labs", "My_Labs"),
+    ("Pre_Delivery_Lab_Checklist", "Pre_Delivery_Lab_Checklist"),
 ]
 PLAN_FIRST_ROW = 10
 PLAN_LAST_COLUMN = 13
@@ -97,21 +110,84 @@ def cell_text(sheet, row: int, column: int) -> str:
     return str(sheet.cell(row, column).value or "").strip().lower()
 
 
+def is_case_row(sheet, row: int) -> bool:
+    """Match Regression_Dashboard Total: rows with a Title (S.No / case id column)."""
+    return bool(str(sheet.cell(row, TITLE_COL).value or "").strip())
+
+
+def counts_as_executed(automated: str, status: str) -> bool:
+    """Executed = automatable row (Yes/Partial/Deviation) with a run result."""
+    auto = (automated or "").strip().lower()
+    st = (status or "").strip().lower()
+    if st not in DASH_RUN:
+        return False
+    return auto in ("yes", "partial", "deviation")
+
+
 def automated_run(sheet) -> int:
-    """Automated=Yes AND Case_Status in Pass/Fail/Failed/Blocked."""
+    """Automated Yes/Partial/Deviation AND Case_Status in Pass/Fail/Failed/Blocked."""
     return sum(
         1
         for row in range(2, sheet.max_row + 1)
-        if cell_text(sheet, row, AUTOMATED_COL) == "yes"
-        and cell_text(sheet, row, STATUS_COL) in DASH_RUN
+        if is_case_row(sheet, row)
+        and counts_as_executed(
+            str(sheet.cell(row, AUTOMATED_COL).value or ""),
+            str(sheet.cell(row, STATUS_COL).value or ""),
+        )
     )
+
+
+def automation_tally(sheet) -> collections.Counter:
+    """Per-sheet Automated column counts (Automation_Coverage semantics)."""
+    counts: collections.Counter = collections.Counter()
+    for row in range(2, sheet.max_row + 1):
+        if not is_case_row(sheet, row):
+            continue
+        automated = str(sheet.cell(row, AUTOMATED_COL).value or "").strip()
+        match = next((s for s in AUTOMATION_STATUSES if s.lower() == automated.lower()), None)
+        counts[match or "Not marked"] += 1
+    return counts
+
+
+def sync_automation_coverage(book) -> int:
+    """Retype Automation_Coverage from case sheets (fixes stale Yes/No totals)."""
+    if "Automation_Coverage" not in book.sheetnames:
+        return 0
+    cov = book["Automation_Coverage"]
+    updated = 0
+    for row in range(2, cov.max_row + 1):
+        label = str(cov.cell(row, 1).value or "").strip()
+        if not label or label.upper().startswith(("TOTAL", "LEGEND", "NOTE")):
+            continue
+        name = resolve(book, label)
+        if name is None:
+            continue
+        counts = automation_tally(book[name])
+        total = sum(counts[s] for s in AUTOMATION_STATUSES)
+        yes = counts["Yes"]
+        partial = counts["Partial"]
+        deviation = counts["Deviation"]
+        deferred = counts["Deferred"]
+        no = counts["No"]
+        automatable = total - no
+        pct = f"{round(100 * yes / automatable)}%" if automatable else "0%"
+        cov.cell(row, 2).value = yes
+        cov.cell(row, 3).value = partial
+        cov.cell(row, 4).value = deviation
+        cov.cell(row, 5).value = deferred
+        cov.cell(row, 6).value = no
+        cov.cell(row, 7).value = total
+        cov.cell(row, 8).value = pct
+        updated += 1
+    return updated
 
 
 def automated_no(sheet) -> int:
     return sum(
         1
         for row in range(2, sheet.max_row + 1)
-        if cell_text(sheet, row, AUTOMATED_COL) == "no"
+        if is_case_row(sheet, row)
+        and cell_text(sheet, row, AUTOMATED_COL) == "no"
     )
 
 
@@ -161,6 +237,8 @@ def build_dashboard(book) -> dict[str, float]:
     blank_row = sheet.max_row
 
     def write_module(row: int, sheet_name: str, label: str) -> None:
+        if row != DASHBOARD_STYLE_ROW:
+            copy_row_style(sheet, DASHBOARD_STYLE_ROW, row)
         source = book[sheet_name]
         quoted = quote_sheetname(sheet_name)
         total = cases(source, TITLE_COL)
@@ -168,7 +246,7 @@ def build_dashboard(book) -> dict[str, float]:
         not_automatable = automated_no(source)
         deferred = max(0, total - executed - not_automatable)
         in_scope = total - not_automatable
-        completion = executed / in_scope if in_scope > 0 else 0
+        completion = min(1.0, executed / in_scope if in_scope > 0 else 0)
 
         sheet.cell(row, 1).value = row - FIRST_ROW + 1
         sheet.cell(row, 2).value = label
@@ -202,6 +280,8 @@ def build_dashboard(book) -> dict[str, float]:
     completion = executed / total if total else 0
 
     plan_row = plan_row_for(book, ASSESSMENT_SHEET)
+    if row != DASHBOARD_STYLE_ROW:
+        copy_row_style(sheet, DASHBOARD_STYLE_ROW, row)
     sheet.cell(row, 1).value = row - FIRST_ROW + 1
     sheet.cell(row, 2).value = ASSESSMENT_LABEL
     sheet.cell(row, 3).value = total
@@ -228,7 +308,7 @@ def build_dashboard(book) -> dict[str, float]:
     for column in (1, 4):
         sheet.cell(total_row, column).value = None
     in_scope = totals["total"] - totals["not_automatable"]
-    completion = totals["executed"] / in_scope if in_scope > 0 else 0
+    completion = min(1.0, totals["executed"] / in_scope if in_scope > 0 else 0)
     sheet.cell(total_row, 2).value = "TOTAL"
     sheet.cell(total_row, 3).value = totals["total"]
     sheet.cell(total_row, 5).value = totals["executed"]
@@ -491,6 +571,9 @@ def main() -> None:
     print(f"{PLAN}:")
     repair_sheet_names(book)
     reorder_plan(book)
+    coverage_rows = sync_automation_coverage(book)
+    if coverage_rows:
+        print(f"  synced Automation_Coverage for {coverage_rows} module row(s)")
     plan_cache = build_plan(book)
     dashboard_cache = build_dashboard(book)
 

@@ -28,8 +28,8 @@ public class AssessmentSet3Steps {
     // A236: enabling randomization hides the manual challenge content source on the form
     @Then("enabling randomization hides the manual content source")
     public void randomizationHidesContentSource() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
-        admin.openNewChallengeForm(Settings.COURSE_ID);
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
+        admin.openNewChallengeForm(ctx.assessmentCourseId());
         Locator rand = ctx.page.locator("select[name='assessment_randomization']");
         if (rand.count() == 0) throw new SkipException("assessment_randomization field not on the form");
         rand.selectOption(new com.microsoft.playwright.options.SelectOption().setLabel("Yes"));

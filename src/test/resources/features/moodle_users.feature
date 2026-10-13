@@ -2,6 +2,7 @@
 # One tag per scenario — the same @U-user-n as Moodle_users Automation_Ref.
 #   .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@U-user-1"
 #   .\mvnw.cmd test -Pwatch "-Dcucumber.features=src/test/resources/features/moodle_users.feature"
+#   .\mvnw.cmd test -Pparallel "-DsuiteXmlFile=testng-parallel5.xml" "-Dparallel.browsers=3" "-Dheadless=true" "-Dcucumber.features=src/test/resources/features/moodle_users.feature"
 
 Feature: Moodle — user administration
 
@@ -12,19 +13,33 @@ Feature: Moodle — user administration
     When admin submits the add-user form using "valid"
     Then the user is created successfully
 
-  Scenario Outline: Add-user form rejects <dataset>
-    When admin submits the add-user form using "<dataset>"
+  # Browser checks cover first name / last name / email; username and password are checked
+  # server-side, so the step also posts the form past the browser checks.
+  @U-user-2
+  Scenario: Add-user form rejects an empty form on every required field
+    When admin submits an empty add-user form
     Then the add-user form is rejected
+    And username, password, first name, last name and email each show a required-field error
 
-    @U-user-2
-    Examples: empty form
-      | dataset |
-      | empty   |
+  # One row per password-policy rule; each password breaks only that rule.
+  # A rule the site policy does not enforce is skipped (the log prints the site policy).
+  Scenario Outline: Add-user form rejects a weak password (<rule>)
+    When admin submits the add-user form with password "<password>" that breaks the "<rule>" rule
+    Then the add-user form is rejected
+    And the password error explains the broken rule
 
     @U-user-3
     Examples: weak password
-      | dataset       |
-      | weak_password |
+      | rule                 | password  |
+      | too short            | Ab1!x     |
+      | no digit             | Abcdefgh! |
+      | no lower case letter | ABCDEFG1! |
+      | no upper case letter | abcdefg1! |
+      | no special character | Abcdefg12 |
+
+  Scenario Outline: Add-user form rejects <dataset>
+    When admin submits the add-user form using "<dataset>"
+    Then the add-user form is rejected
 
     @U-user-4
     Examples: invalid email
@@ -189,6 +204,7 @@ Feature: Moodle — user administration
     When admin assigns the Manager system role to the registered user
     Then the registered user has the Manager system role
     When admin removes the Manager system role from the registered user
+    Then the registered user no longer has the Manager system role
 
   @U-user-31
   Scenario: Admin can suspend multiple users from the user list
@@ -196,7 +212,7 @@ Feature: Moodle — user administration
     When admin suspends the two registered users from the user list
     Then both registered users are shown as suspended in the list
 
-  @U-user-31
+  @U-user-32
   Scenario: Admin can bulk delete users
     Given two registered users
     When admin bulk deletes the two registered users

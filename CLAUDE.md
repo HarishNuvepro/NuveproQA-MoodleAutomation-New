@@ -182,6 +182,14 @@ residual UI read must wait for a real row (`open()` already does).
 - **Confirm modals (Moodle 4.5):** don't target `.modal.show`/`[data-action=save]` directly (hidden
   duplicate modals exist). `BasePage.confirmModal()` POLLS `page.evaluate` to click the VISIBLE
   `[data-region=modal-container]` save button (handles "Yes" and "Stop"). Don't revert to a single click.
+- **Slow form submits (Moodle POSTs > 15s):** never `submit.click()` + `waitForLoadState()` — the
+ click times out "waiting for scheduled navigations" and `waitForLoadState` returns on the OLD page.
+ Use `BasePage.submitAndAwaitNewPage(locator)` / `helpers.FormSubmit.andAwaitNewPage(page, locator[, ms])`
+ (marks the document, no-wait click, polls for the new one; returns early on a visible validation
+ error). Pass ~30_000 for negative-validation submits. Long jobs with their own poll loop (upload
+ users, course copy, restore) use `clickSlowSubmit` and wrap DOM probes in try/catch.
+- **JDK:** `mvnw.cmd` auto-selects an installed JDK ≥17 when `JAVA_HOME` is missing/older (Java 8 is
+ first on PATH here); the enforcer rule fails fast otherwise.
 - **Lab-state dependency:** after a lab exists the landing shows "Continue" not "Start Sandbox".
   Use `PlaygroundLanding.openLabConsole()` (handles both). The lab is SERVER-SIDE, so a fresh browser
   context reopening the activity still sees the running lab.
@@ -197,6 +205,13 @@ residual UI read must wait for a real row (`open()` already does).
 - **Traceability + execution** (manual case → scenario → last result): `reports/traceability_execution.{html,csv}`,
   from `tools/traceability.py` (Python; merges `target/cucumber_fast.json` + `cucumber_slow.json` — save
   each run's `target/cucumber.json` to those names before regenerating). "Automated" = a scenario exists.
+- **After ANY Kiwi / coverage / @tag change (same PR or agent turn):** run
+  `python tools/sync_kiwi_and_traceability.py` — refreshes dashboard formula caches and regenerates the
+  traceability matrix. Do this without waiting for the user to ask. Optional: `--strict` fails on dashboard DRIFT.
+- **On-demand cleanup (never default `mvn test`):** after the user confirms a green module run, they run
+  `mvnw test -Pcleanup` or `cleanup.cmd` (see `docs/CLEANUP.md`, `RUNNERS.md`). Track artefacts in
+  `target/automation-manifest.properties` and suite-course property files; do not delete `.env` fixture
+  courses/cmid-only resources. Module runs: `-Dautomation.deferCleanup=true`; preview: `-DcleanupDryRun=true`.
 - **Failure diagnostics (automatic).** On any scenario FAILURE, `steps/FailureCapture` (wired into the
   `Hooks.@After`) dumps `target/failures/<scenario>/`: `screenshot.png`, `page.html` (DOM at failure),
   `console.log` (browser console + page errors, collected via `TestContext` listeners), `trace.zip`

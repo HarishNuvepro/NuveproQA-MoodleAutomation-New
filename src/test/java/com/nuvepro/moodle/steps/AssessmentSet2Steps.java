@@ -41,8 +41,8 @@ public class AssessmentSet2Steps {
 
     @Given("a challenge activity form for cooldown checks")
     public void challengeFormForCooldown() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
-        admin.openNewChallengeForm(Settings.COURSE_ID);
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
+        admin.openNewChallengeForm(ctx.assessmentCourseId());
     }
 
     @Then("the cooldown period field is on the form")

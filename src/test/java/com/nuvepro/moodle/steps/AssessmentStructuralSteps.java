@@ -39,8 +39,8 @@ public class AssessmentStructuralSteps {
 
     @Given("a new assessment challenge activity form for structural checks")
     public void aNewChallengeForm() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
-        admin.openNewChallengeForm(Settings.COURSE_ID);
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
+        admin.openNewChallengeForm(ctx.assessmentCourseId());
     }
 
     @Then("the test-case different-marks option is available for auto evaluation")

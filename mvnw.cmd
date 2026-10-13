@@ -33,7 +33,7 @@
 @SET __MVNW_PSMODULEP_SAVE=%PSModulePath%
 @SET PSModulePath=
 @FOR /F "usebackq tokens=1* delims==" %%A IN (`powershell -noprofile "& {$scriptDir='%~dp0'; $script='%__MVNW_ARG0_NAME__%'; icm -ScriptBlock ([Scriptblock]::Create((Get-Content -Raw '%~f0'))) -NoNewScope}"`) DO @(
-  IF "%%A"=="MVN_CMD" (set __MVNW_CMD__=%%B) ELSE IF "%%B"=="" (echo %%A) ELSE (echo %%A=%%B)
+  IF "%%A"=="MVN_CMD" (set __MVNW_CMD__=%%B) ELSE IF "%%A"=="MVNW_JAVA_HOME" (set "JAVA_HOME=%%B" & echo [mvnw] JAVA_HOME=%%B) ELSE IF "%%B"=="" (echo %%A) ELSE (echo %%A=%%B)
 )
 @SET PSModulePath=%__MVNW_PSMODULEP_SAVE%
 @SET __MVNW_PSMODULEP_SAVE=
@@ -48,6 +48,33 @@
 $ErrorActionPreference = "Stop"
 if ($env:MVNW_VERBOSE -eq "true") {
   $VerbosePreference = "Continue"
+}
+
+# The build needs JDK 17+ (release 17, TestNG 7.10). A machine-wide Java 8 on PATH (e.g. Oracle's
+# java8path shim) otherwise wins when JAVA_HOME is unset, and surefire dies with "class file version 55.0".
+function Get-JdkMajor([string]$jdkHome) {
+  $release = Join-Path $jdkHome "release"
+  if (-not (Test-Path -Path $release -PathType Leaf)) { return 0 }
+  $match = Select-String -Path $release -Pattern '^JAVA_VERSION="([^"]+)"' | Select-Object -First 1
+  if (-not $match) { return 0 }
+  $parts = $match.Matches[0].Groups[1].Value.Split('.')
+  if ($parts[0] -eq '1') { return [int]$parts[1] }
+  return [int]($parts[0] -replace '\D.*$','')
+}
+if (-not ($env:JAVA_HOME -and (Get-JdkMajor $env:JAVA_HOME) -ge 17)) {
+  $jdkRoots = @(
+    "$env:ProgramFiles\Eclipse Adoptium", "$env:ProgramFiles\Java", "$env:ProgramFiles\Microsoft",
+    "$env:ProgramFiles\Zulu", "$env:ProgramFiles\Amazon Corretto", "$HOME\.jdks"
+  )
+  $jdk = $jdkRoots | Where-Object { Test-Path -Path $_ -PathType Container } |
+    ForEach-Object { Get-ChildItem -Path $_ -Directory -ErrorAction SilentlyContinue } |
+    ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Major = (Get-JdkMajor $_.FullName) } } |
+    Where-Object { $_.Major -ge 17 } | Sort-Object Major | Select-Object -First 1
+  if ($jdk) {
+    Write-Output "MVNW_JAVA_HOME=$($jdk.Path)"
+  } else {
+    Write-Warning "No JDK 17+ found; install one (e.g. Eclipse Adoptium) or set JAVA_HOME."
+  }
 }
 
 # calculate distributionUrl, requires .mvn/wrapper/maven-wrapper.properties

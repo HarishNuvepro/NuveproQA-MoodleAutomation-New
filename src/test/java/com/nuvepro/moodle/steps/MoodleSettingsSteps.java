@@ -2,6 +2,8 @@ package com.nuvepro.moodle.steps;
 
 import com.microsoft.playwright.Browser;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.SettingsBaseline;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.CourseAdmin;
 import com.nuvepro.moodle.pages.MoodleSettings;
 import io.cucumber.java.After;
@@ -53,6 +55,9 @@ public class MoodleSettingsSteps {
     @When("I set the {string} field to {string} and save")
     public void setFieldAndSave(String fieldId, String value) {
         originalValues.putIfAbsent(fieldId, settings.getValue(fieldId));
+        if (currentSection != null) {
+            SettingsBaseline.capture(currentSection, fieldId, originalValues.get(fieldId));
+        }
         settings.setValue(fieldId, value);
         settings.save();
     }
@@ -238,6 +243,7 @@ public class MoodleSettingsSteps {
         String stamp = String.valueOf(System.currentTimeMillis() % 1_000_000);
         String id = new CourseAdmin(ctx.page).createCourse(prefix + " " + stamp, prefix + stamp);
         throwawayCourses.add(id);
+        com.nuvepro.moodle.helpers.AutomationManifest.registerAllCoursesCourse(id);
         return id;
     }
 
@@ -271,7 +277,7 @@ public class MoodleSettingsSteps {
 
     @Given("I am logged in as a student")
     public void iAmLoggedInAsAStudent() {
-        ctx.studentContext = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        ctx.studentContext = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(com.nuvepro.moodle.config.Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         ctx.studentPage = ctx.studentContext.newPage();
         ctx.studentPage.setDefaultTimeout(com.nuvepro.moodle.config.Settings.DEFAULT_TIMEOUT_MS);
@@ -293,6 +299,10 @@ public class MoodleSettingsSteps {
     /** Leave shared site config exactly as this scenario found it. */
     @After("@settings")
     public void restoreOriginalValues() {
+        if (!com.nuvepro.moodle.helpers.CleanupPolicy.runScenarioCleanup()) {
+            System.out.println("[settings] deferCleanup=true — baseline kept for @settings-cleanup");
+            return;
+        }
         try {
             if (originalAdvanced != null) {
                 settings.restoreAdvancedGradeItemStates(originalAdvanced);

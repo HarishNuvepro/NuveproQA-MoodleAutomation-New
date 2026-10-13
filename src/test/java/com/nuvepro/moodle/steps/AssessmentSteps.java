@@ -8,6 +8,8 @@ import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
 import com.nuvepro.moodle.helpers.CloudLabsClient;
+import com.nuvepro.moodle.helpers.FormSubmit;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ChallengeControlPanel;
 import com.nuvepro.moodle.pages.ManageLabs;
 import io.cucumber.java.After;
@@ -84,9 +86,9 @@ public class AssessmentSteps {
 
     @When("I open a new challenge activity form")
     public void iOpenANewChallengeActivityForm() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
         ctx.page.navigate(Settings.BASE_URL + "/course/modedit.php?add=cloudlabs&type=&course="
-                        + Settings.COURSE_ID + "&section=0&return=0&sr=0",
+                        + ctx.assessmentCourseId() + "&section=0&return=0&sr=0",
                 new Page.NavigateOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
                         .setTimeout(45_000));
         ctx.page.waitForTimeout(2_000);
@@ -198,8 +200,8 @@ public class AssessmentSteps {
     }
 
     private void save() {
-        ctx.page.locator("#id_submitbutton").click();
-        ctx.page.waitForTimeout(2_500);
+        FormSubmit.andAwaitNewPage(ctx.page, ctx.page.locator("#id_submitbutton"), 30_000);
+        ctx.page.waitForTimeout(1_000);
     }
 
     private void assertStillOnFormWith(String errorFragment, String what) {
@@ -286,7 +288,7 @@ public class AssessmentSteps {
 
     @When("the student opens the assessment activity")
     public void theStudentOpensTheAssessmentActivity() {
-        studentCtx = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        studentCtx = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         studentPage = studentCtx.newPage();
         studentPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);

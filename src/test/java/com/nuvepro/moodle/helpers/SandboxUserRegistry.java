@@ -69,6 +69,22 @@ public final class SandboxUserRegistry {
         return new ApiClient.SeededUser(Long.parseLong(id), username, email, password);
     }
 
+    /** Optional chain metadata (e.g. CloudLabs subscription id for SB-user-14 → SB-user-19). */
+    public static synchronized void putNamedMeta(String key, String metaKey, String value) {
+        if (key == null || key.isBlank() || metaKey == null || metaKey.isBlank()) return;
+        if (value == null || value.isBlank()) return;
+        Properties p = load();
+        p.setProperty("named." + key.trim() + ".meta." + metaKey.trim(), value.trim());
+        store(p);
+    }
+
+    public static synchronized String getNamedMeta(String key, String metaKey) {
+        if (key == null || key.isBlank() || metaKey == null || metaKey.isBlank()) return null;
+        Properties p = load();
+        String v = p.getProperty("named." + key.trim() + ".meta." + metaKey.trim(), "").trim();
+        return v.isBlank() ? null : v;
+    }
+
     public static synchronized void put(long courseId, ApiClient.SeededUser user) {
         if (user == null || user.username == null || user.username.isBlank()) return;
         Properties p = load();

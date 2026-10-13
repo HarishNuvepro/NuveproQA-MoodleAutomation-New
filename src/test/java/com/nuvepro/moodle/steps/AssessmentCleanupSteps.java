@@ -22,7 +22,7 @@ public class AssessmentCleanupSteps {
 
     @When("admin deletes all registered assessment activities")
     public void adminDeletesAllRegisteredAssessmentActivities() {
-        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        if (ctx.assessmentCourseMissing()) throw new SkipException("COURSE_ID not set and no assessment suite course");
         List<AssessmentActivityRegistry.Entry> entries = AssessmentActivityRegistry.all();
         if (entries.isEmpty()) {
             System.out.println("[assessment-cleanup] no registered activities");
@@ -33,7 +33,7 @@ public class AssessmentCleanupSteps {
             if (entry == null || entry.cmid() == null || entry.cmid().isBlank()) continue;
             if (!deleted.add(entry.cmid())) continue;
             try {
-                ctx.page.navigate(Settings.BASE_URL + "/course/view.php?id=" + Settings.COURSE_ID,
+                ctx.page.navigate(Settings.BASE_URL + "/course/view.php?id=" + ctx.assessmentCourseId(),
                         new com.microsoft.playwright.Page.NavigateOptions()
                                 .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
                                 .setTimeout(45_000));

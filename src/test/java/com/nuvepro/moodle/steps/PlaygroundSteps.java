@@ -8,6 +8,7 @@ import com.microsoft.playwright.assertions.PlaywrightAssertions;
 import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import com.nuvepro.moodle.config.Settings;
+import com.nuvepro.moodle.helpers.FormSubmit;
 import com.nuvepro.moodle.pages.ManageLabs;
 import com.nuvepro.moodle.pages.PlaygroundControlPanel;
 import com.nuvepro.moodle.pages.PlaygroundLanding;
@@ -126,8 +127,7 @@ public class PlaygroundSteps {
                 }
             }
         }
-        page.locator("#id_submitbutton").click();
-        page.waitForLoadState(LoadState.DOMCONTENTLOADED);
+        FormSubmit.andAwaitNewPage(page, page.locator("#id_submitbutton"));
         assertFalse(page.url().contains("modedit.php"), "activity form did not submit: " + page.url());
 
         String cmid = null;
@@ -259,8 +259,7 @@ public class PlaygroundSteps {
                     + "to an existing catalog sandbox activity cmid");
         }
         sel.selectOption(catalogValue);
-        page.locator("#id_submitbutton").click();
-        page.waitForLoadState(LoadState.DOMCONTENTLOADED);
+        FormSubmit.andAwaitNewPage(page, page.locator("#id_submitbutton"));
         assertFalse(page.url().contains("modedit.php"), "catalog sandbox form did not submit: " + page.url());
         String cmid = null;
         Matcher m = Pattern.compile("/mod/cloudlabs/view\\.php\\?id=(\\d+)").matcher(page.url());
@@ -301,18 +300,7 @@ public class PlaygroundSteps {
 
     @When("I open the CloudLabs course progress report")
     public void iOpenTheCourseProgressReport() {
-        ctx.page.navigate(Settings.BASE_URL + "/report/cloudlabsreport/index.php",
-                new com.microsoft.playwright.Page.NavigateOptions()
-                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
-                        .setTimeout(45_000));
-    }
-
-    @Then("the report loads without errors")
-    public void theReportLoadsWithoutErrors() {
-        assertTrue(ctx.page.url().contains("/report/cloudlabsreport/"));
-        assertTrue(ctx.page.locator("#region-main, table").count() > 0, "report page did not render");
-        String body = ctx.page.locator("body").innerText().toLowerCase();
-        assertFalse(body.contains("exception") || body.contains("error/"));
+        new com.nuvepro.moodle.pages.CloudLabsCourseReportPage(ctx.page).openCoursesReport();
     }
 
     // ---------- PG-12 start ----------

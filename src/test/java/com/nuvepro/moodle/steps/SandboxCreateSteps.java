@@ -11,6 +11,7 @@ import com.nuvepro.moodle.helpers.SandboxActivityRegistry;
 import com.nuvepro.moodle.helpers.SandboxCourse;
 import com.nuvepro.moodle.helpers.SandboxTestData;
 import com.nuvepro.moodle.helpers.SandboxUserRegistry;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ChallengeActivityForm;
 import com.nuvepro.moodle.pages.CourseView;
 import io.cucumber.java.en.Then;
@@ -193,12 +194,69 @@ public class SandboxCreateSteps {
     @When("admin tries to create a sandbox activity using {string}")
     public void adminTriesToCreateASandboxActivityUsing(String dataset) {
         String courseId = SandboxCourse.ensure(ctx.page);
-        last = SandboxTestData.create(dataset);
-        ctx.lastCreateSpec = last;
-        ctx.newActivityDataset = dataset;
-        form.openAddFormFromCourse(courseId);
-        form.fill(last);
-        form.saveAndDisplay();
+        synchronized (SandboxCreateSteps.class) {
+            last = SandboxTestData.create(dataset);
+            ctx.lastCreateSpec = last;
+            ctx.newActivityDataset = dataset;
+            form.openAddFormFromCourse(courseId);
+            form.fill(last);
+            form.saveAndDisplay();
+        }
+    }
+
+    @Then("the sandbox activity is not created and a validation error is shown")
+    public void theSandboxActivityIsNotCreatedAndAValidationErrorIsShown() {
+        assertTrue(form.rejectedCreate(),
+                "create was accepted (url=" + ctx.page.url() + ") — expected to stay on the form with validation");
+        assertTrue(ctx.page.url().contains("modedit.php"),
+                "left the add form; activity may have been created: " + ctx.page.url());
+    }
+
+    @When("an enrolled student opens the sandbox suite course")
+    public void anEnrolledStudentOpensTheSandboxSuiteCourse() {
+        SandboxCourse.ensure(ctx.page);
+        if (Settings.WS_TOKEN.isEmpty()) throw new SkipException("MOODLE_WS_TOKEN not set");
+        student = ApiClient.createUser(System.currentTimeMillis());
+        ApiClient.enrolUser(student.id, SandboxCourse.idLong(), 5);
+        SandboxUserRegistry.put(SandboxCourse.idLong(), student);
+        ctx.studentContext = BrowserUi.newContext(ctx.browser, new Browser.NewContextOptions()
+                .setBaseURL(Settings.BASE_URL)
+                .setIgnoreHTTPSErrors(true));
+        ctx.studentPage = ctx.studentContext.newPage();
+        ctx.studentPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
+        Auth.uiLogin(ctx.studentPage, student.username, student.password);
+        ctx.studentPage.navigate(Settings.BASE_URL + "/course/view.php?id=" + SandboxCourse.id(),
+                new Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.studentPage.waitForTimeout(1_500);
+    }
+
+    @Then("the student cannot add a Lab activity on the sandbox suite course")
+    public void theStudentCannotAddALabActivityOnTheSandboxSuiteCourse() {
+        Page p = ctx.studentPage;
+        assertNotNull(p, "student page was not opened");
+        String courseId = SandboxCourse.id();
+        int chooser = p.locator("#section-0 [data-action='open-chooser'], "
+                + "li#section-0 .activity-add, #section-0 a.section-modchooser-link, "
+                + "button:has-text('Add an activity or resource'), "
+                + "button:has-text('Add an activity')").count();
+        assertTrue(chooser == 0, "student sees Add an activity on the sandbox suite course page");
+        p.navigate(Settings.BASE_URL + "/course/modedit.php?add=cloudlabs&type=&course="
+                        + courseId + "&section=0&return=0&sr=0",
+                new Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        p.waitForTimeout(1_500);
+        String body = p.locator("body").innerText().toLowerCase();
+        boolean formOpen = p.locator("#id_submitbutton").count() > 0 && p.locator("#id_name").count() > 0;
+        assertFalse(formOpen,
+                "student opened the Lab add form (capability should deny add=cloudlabs)");
+        assertTrue(!p.url().contains("modedit.php")
+                        || body.contains("sorry")
+                        || body.contains("not allowed")
+                        || body.contains("permission"),
+                "student was not blocked from adding a Lab (url=" + p.url() + ")");
     }
 
     @Then("admin sees the sandbox Activity Name for Admins on the edit form")
@@ -221,7 +279,7 @@ public class SandboxCreateSteps {
         student = ApiClient.createUser(System.currentTimeMillis());
         ApiClient.enrolUser(student.id, SandboxCourse.idLong(), 5);
         SandboxUserRegistry.put(SandboxCourse.idLong(), student);
-        ctx.studentContext = ctx.browser.newContext(new Browser.NewContextOptions()
+        ctx.studentContext = BrowserUi.newContext(ctx.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL)
                 .setIgnoreHTTPSErrors(true));
         ctx.studentPage = ctx.studentContext.newPage();

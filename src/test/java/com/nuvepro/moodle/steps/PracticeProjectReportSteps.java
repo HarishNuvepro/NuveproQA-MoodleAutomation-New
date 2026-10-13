@@ -2,6 +2,7 @@ package com.nuvepro.moodle.steps;
 
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
+import com.nuvepro.moodle.helpers.PracticeProjectFixtures;
 import com.nuvepro.moodle.pages.GuidedLanding;
 import com.nuvepro.moodle.pages.PracticeProjectReportsPage;
 import io.cucumber.java.After;
@@ -181,7 +182,7 @@ public class PracticeProjectReportSteps {
 
     private long guidedCourseId() {
         GuidedLanding landing = new GuidedLanding(ctx.page);
-        landing.open(Integer.parseInt(Settings.GUIDED_CMID));
+        landing.open(Integer.parseInt(PracticeProjectFixtures.primaryCmid(ctx.page)));
         String classes = ctx.page.locator("body").getAttribute("class");
         Matcher matcher = Pattern.compile("course-(\\d+)").matcher(classes == null ? "" : classes);
         if (!matcher.find()) throw new SkipException("could not determine Practice Project course id");
@@ -192,6 +193,10 @@ public class PracticeProjectReportSteps {
     public void cleanupReportFixture(io.cucumber.java.Scenario scenario) {
         String uri = scenario.getUri() == null ? "" : scenario.getUri().toString();
         if (!uri.contains("practice_project_reports")) {
+            return;
+        }
+        if (!com.nuvepro.moodle.helpers.CleanupPolicy.runScenarioCleanup()) {
+            System.out.println("[PP-reports] deferCleanup=true — seeded user left for @cleanup-users");
             return;
         }
         if (user != null) {

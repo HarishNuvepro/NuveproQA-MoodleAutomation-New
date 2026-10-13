@@ -2,6 +2,7 @@
 # One tag per scenario — the same @UU-Sn as Upload_Users Automation_Ref.
 #   .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@UU-S1"
 #   .\mvnw.cmd test -Pwatch "-Dcucumber.features=src/test/resources/features/upload_users.feature"
+#   .\mvnw.cmd test -Pparallel "-DsuiteXmlFile=testng-parallel5.xml" "-Dparallel.browsers=3" "-Dheadless=true" "-Dcucumber.features=src/test/resources/features/upload_users.feature"
 
 Feature: Moodle — Upload users
 

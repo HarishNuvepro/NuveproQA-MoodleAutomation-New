@@ -6,6 +6,7 @@ import com.microsoft.playwright.Page;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.CloudLabsClient;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ManageLabs;
 import io.cucumber.java.After;
 import io.cucumber.java.en.Given;
@@ -104,7 +105,7 @@ public class BulkLabSteps {
     public void cleanupBulk() {
         // Use a FRESH context (not ctx.page — the @After ordering may have already closed it) to
         // trigger both deletes; then delete the users (which also cascade-deletes their labs).
-        try (BrowserContext c = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        try (BrowserContext c = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true)
                 .setStorageStatePath(GlobalHooks.STORAGE_STATE))) {
             Page p = c.newPage();

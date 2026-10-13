@@ -8,6 +8,7 @@ import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
 import com.nuvepro.moodle.helpers.CloudLabsClient;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ChallengeControlPanel;
 import com.nuvepro.moodle.pages.ManageLabs;
 import io.cucumber.java.AfterAll;
@@ -84,7 +85,7 @@ public class AssessmentLifecycleSteps {
         // Seed + enrol a throwaway student, then log in as them in a separate context.
         student = ApiClient.createUser(System.currentTimeMillis());
         ApiClient.enrolUser(student.id, courseId, 5);
-        studentCtx = GlobalHooks.browser.newContext(new Browser.NewContextOptions()
+        studentCtx = BrowserUi.newContext(GlobalHooks.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         studentPage = studentCtx.newPage();
         studentPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);

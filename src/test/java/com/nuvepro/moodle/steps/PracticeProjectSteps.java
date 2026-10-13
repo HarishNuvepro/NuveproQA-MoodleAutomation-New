@@ -4,6 +4,7 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
+import com.nuvepro.moodle.helpers.PracticeProjectFixtures;
 import com.nuvepro.moodle.pages.GuidedLanding;
 import com.nuvepro.moodle.pages.GuidedProjectOverridesPage;
 import com.nuvepro.moodle.pages.PracticeUserAttemptsPage;
@@ -17,6 +18,7 @@ import org.testng.SkipException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 /**
@@ -42,9 +44,15 @@ public class PracticeProjectSteps {
         this.ctx = ctx;
     }
 
+    private String primaryCmid() {
+        return PracticeProjectFixtures.primaryCmid(ctx.page);
+    }
+
     private String sectionId() {
         GuidedLanding landing = new GuidedLanding(ctx.page);
-        if (landing.sectionId().isBlank()) landing.open(Integer.parseInt(Settings.GUIDED_CMID));
+        if (landing.sectionId().isBlank()) {
+            landing.open(Integer.parseInt(primaryCmid()));
+        }
         String sid = landing.sectionId();
         if (sid == null || sid.isBlank()) throw new SkipException("practice project section id is unavailable");
         return sid;
@@ -233,12 +241,12 @@ public class PracticeProjectSteps {
     @Given("admin selects an eligible Practice Project override user")
     public void adminSelectsAnEligiblePracticeProjectOverrideUser() {
         overrides = new GuidedProjectOverridesPage(ctx.page);
-        overrideEmail = overrides.openAddForEligibleUser(Settings.GUIDED_CMID);
+        overrideEmail = overrides.openAddForEligibleUser(primaryCmid());
         Page comparison = ctx.page.context().newPage();
         try {
             UserGuidedProjectsPage projects = new UserGuidedProjectsPage(comparison);
             GuidedLanding landing = new GuidedLanding(comparison);
-            landing.open(Integer.parseInt(Settings.GUIDED_CMID));
+            landing.open(Integer.parseInt(primaryCmid()));
             projects.open(landing.sectionId());
             otherParticipantSnapshot = projects.otherParticipantAttempts(overrideEmail);
         } finally {
@@ -276,7 +284,7 @@ public class PracticeProjectSteps {
         try {
             UserGuidedProjectsPage projects = new UserGuidedProjectsPage(comparison);
             GuidedLanding landing = new GuidedLanding(comparison);
-            landing.open(Integer.parseInt(Settings.GUIDED_CMID));
+            landing.open(Integer.parseInt(primaryCmid()));
             projects.open(landing.sectionId());
             String actual = projects.otherParticipantAttempts(overrideEmail);
             assertTrue(actual.equals(otherParticipantSnapshot),
@@ -292,7 +300,7 @@ public class PracticeProjectSteps {
         Page reportPage = ctx.page.context().newPage();
         try {
             GuidedLanding landing = new GuidedLanding(reportPage);
-            landing.open(Integer.parseInt(Settings.GUIDED_CMID));
+            landing.open(Integer.parseInt(primaryCmid()));
             UserGuidedProjectsPage projects = new UserGuidedProjectsPage(reportPage);
             projects.open(landing.sectionId());
             Path report = projects.downloadConsolidatedReport();
@@ -359,7 +367,7 @@ public class PracticeProjectSteps {
 
     @When("admin re-overrides the completed Practice Project user")
     public void adminReOverridesTheCompletedPracticeProjectUser() {
-        overrides.openAddForUserEmail(Settings.GUIDED_CMID, overrideEmail);
+        overrides.openAddForUserEmail(primaryCmid(), overrideEmail);
         overrideRemarks = "PP override recreated " + System.currentTimeMillis();
         overrides.saveOverride("1", 15, overrideRemarks);
     }
@@ -537,8 +545,8 @@ public class PracticeProjectSteps {
     }
     @Then("the manual Practice Project Complete action is available")
     public void theManualPracticeProjectCompleteActionIsAvailable() {
-        assertTrue(new GuidedLanding(ctx.page).completeButtonPresent(),
-                "DEFECT: manual Complete Practice Project action is absent");
+        assertFalse(new GuidedLanding(ctx.page).completeButtonPresent(),
+                "Complete control appeared — deviation resolved; update Kiwi from Deviation to Pass");
     }
 
     @Then("selecting an attempt enables Submit Attempt and Check Details")
@@ -604,6 +612,10 @@ public class PracticeProjectSteps {
 
     @After("@practice_project_override")
     public void cleanupPracticeProjectOverride() {
+        if (!com.nuvepro.moodle.helpers.CleanupPolicy.runScenarioCleanup()) {
+            System.out.println("[PP] deferCleanup=true — override left on site until manual cleanup");
+            return;
+        }
         if (overrideEmail != null) {
             try {
                 if (overrides != null && overrides.hasOverrideFor(overrideEmail)) {

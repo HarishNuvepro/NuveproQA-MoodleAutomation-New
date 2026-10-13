@@ -350,11 +350,18 @@ public class CourseView extends BasePage {
                 .filter(new Locator.FilterOptions().setHasText(name)).first();
     }
 
-    /** True if the activity shows a restrict-access "Not available unless" message. */
+    /** True if the activity is gated by restrict-access (message and/or dimmed on the course page). */
     public boolean isRestricted(String name) {
-        Locator info = activity(name).locator(".availabilityinfo");
+        Locator act = activity(name);
+        if (act.count() == 0) return false;
+        try {
+            String cls = nz(act.getAttribute("class"));
+            if (cls.contains("dimmed") || cls.contains("restricted")) return true;
+        } catch (RuntimeException ignored) {}
+        Locator info = act.locator(".availabilityinfo, [data-region='availability-info']");
         if (info.count() == 0) return false;
-        return info.first().innerText().toLowerCase().contains("not available");
+        String t = info.first().innerText().toLowerCase();
+        return t.contains("not available") || t.contains("requires:") || t.contains("available until");
     }
 
     /** The restriction message text (empty if none). */
@@ -363,24 +370,93 @@ public class CourseView extends BasePage {
         return info.count() > 0 ? info.first().innerText().trim() : "";
     }
 
-    /** True once the activity is marked complete (the manual toggle reads "Done", not "Mark as done"). */
-    public boolean isCompleted(String name) {
+    /** True when the student has clicked manual "Mark as done" (toggle shows Done / aria-pressed). */
+    public boolean isManualMarkDone(String name) {
         Locator toggle = activity(name).locator("[data-action='toggle-manual-completion']");
-        if (toggle.count() > 0) {
-            String t = toggle.first().innerText().trim().toLowerCase();
-            String pressed = toggle.first().getAttribute("aria-pressed");
-            return "true".equals(pressed) || (t.equals("done") || t.contains("done") && !t.contains("mark"));
-        }
-        // fall back to a completion-state indicator on the activity
+        if (toggle.count() == 0) return false;
+        String t = toggle.first().innerText().trim().toLowerCase();
+        String pressed = toggle.first().getAttribute("aria-pressed");
+        return "true".equals(pressed) || (t.equals("done") || t.contains("done") && !t.contains("mark"));
+    }
+
+    /** Grade/automatic completion badge on the course page (independent of manual mark-as-done). */
+    public boolean showsActivityCompletionBadge(String name) {
         return activity(name).locator(".completion-dropdown .badge-success, "
                 + "[data-region='completion-info'] .badge-success").count() > 0;
     }
 
+    /** True once the activity is marked complete (manual toggle Done, or completion badge when no toggle). */
+    public boolean isCompleted(String name) {
+        if (hasManualCompletionToggle(name)) {
+            return isManualMarkDone(name);
+        }
+        return showsActivityCompletionBadge(name);
+    }
+
+    public boolean hasManualCompletionToggle(String name) {
+        return activity(name).locator("[data-action='toggle-manual-completion']").count() > 0;
+    }
+
     /** Click the activity's "Mark as done" manual-completion toggle. */
     public void markDone(String name) {
-        Locator toggle = activity(name).locator("[data-action='toggle-manual-completion']");
-        toggle.first().click();
-        page.waitForTimeout(1_500);   // AJAX toggle
+        // The toggle is an AJAX call. A fixed short wait is not enough under load: navigating (or closing
+        // the context on re-login) while it is in flight loses the completion. So: click, wait until the
+        // control itself flips to Done (the DOM only updates after the server accepted it), then RELOAD
+        // and confirm it persisted; retry the whole thing if it did not.
+        // NOTE: the course page may reload itself after the click ("Execution context was destroyed"),
+        // so every DOM probe goes through the navigation-tolerant doneNow().
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            if (!doneNow(name)) {
+                try {
+                    Locator toggle = activity(name).locator("[data-action='toggle-manual-completion']");
+                    if (toggle.count() == 0) {
+                        throw new IllegalStateException("no manual 'Mark as done' control for '" + name + "'");
+                    }
+                    toggle.first().click();
+                } catch (com.microsoft.playwright.PlaywrightException navigating) {
+                    // the click can itself trigger the reload — fine, verified below
+                }
+                for (int i = 0; i < 30 && !doneNow(name); i++) {   // up to ~15s
+                    page.waitForTimeout(500);
+                }
+            }
+            page.waitForTimeout(1_000);
+            try {
+                page.reload(new Page.ReloadOptions().setWaitUntil(
+                        com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
+            } catch (com.microsoft.playwright.PlaywrightException ignored) {
+                // a self-triggered navigation was already in flight; the probe below waits it out
+            }
+            page.waitForTimeout(1_000);
+            for (int i = 0; i < 6 && !doneNow(name); i++) {
+                page.waitForTimeout(500);
+            }
+            if (doneNow(name)) {
+                return;   // persisted server-side (checked on a freshly loaded page)
+            }
+            System.out.println("[CourseView] markDone('" + name + "') not persisted after attempt " + attempt);
+        }
+        throw new IllegalStateException("'Mark as done' for '" + name + "' did not persist after 3 attempts");
+    }
+
+    /** {@link #isManualMarkDone} that survives the page navigating underneath the probe. */
+    private boolean doneNow(String name) {
+        for (int i = 0; i < 5; i++) {
+            try {
+                return isManualMarkDone(name);
+            } catch (com.microsoft.playwright.PlaywrightException navigating) {
+                page.waitForTimeout(700);
+            }
+        }
+        return false;
+    }
+
+    /** Mark as done when the course page shows the manual-completion control. */
+    public void markDoneIfPresent(String name) {
+        if (!hasManualCompletionToggle(name)) return;
+        if (!isCompleted(name)) {
+            markDone(name);
+        }
     }
 
     /** True if the activity is present and has a working view link (i.e. accessible/enabled). */

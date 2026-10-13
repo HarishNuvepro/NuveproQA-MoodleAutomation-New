@@ -1,6 +1,8 @@
-# Site-created Moodle configurable reports. Set PRACTICE_DETAILED_REPORT_URL and
-# PRACTICE_SUMMARY_REPORT_URL when they are not discoverable from /reportbuilder/index.php.
+# Site-created Moodle configurable reports — deferred (not automatable on QA until Report Builder URLs exist).
+# Excluded from default runs via @skip. Kiwi: Automated=No on report rows.
+#   .\mvnw.cmd test -Pwatch "-Dcucumber.tags=@PP-69"   (only if URLs configured later)
 
+@skip @pp-reports-deferred
 Feature: Practice Project detailed and summary reports
 
   @PP-69

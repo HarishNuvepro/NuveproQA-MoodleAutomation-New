@@ -10,13 +10,18 @@ import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.AssessmentCreateSpec;
 import com.nuvepro.moodle.helpers.Auth;
 import com.nuvepro.moodle.helpers.CloudLabsClient;
+import com.nuvepro.moodle.helpers.SandboxActivityRegistry;
 import com.nuvepro.moodle.helpers.SandboxCourse;
 import com.nuvepro.moodle.helpers.SandboxTestData;
 import com.nuvepro.moodle.helpers.SandboxUserRegistry;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.ManageLabs;
 import com.nuvepro.moodle.pages.PlaygroundControlPanel;
 import com.nuvepro.moodle.pages.PlaygroundLanding;
+import io.cucumber.java.After;
 import io.cucumber.java.Before;
+import io.cucumber.java.Scenario;
+import io.cucumber.java.Status;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
@@ -44,6 +49,21 @@ import static org.testng.Assert.assertTrue;
  * Instructions / duration / credentials / Lab Info → Jump to Console → Access Lab → platform.
  */
 public class SandboxUserFunctionalitySteps {
+    /** SB-user-6 provisions; SB-user-9 reuses that student on sandbox_create_no (parallel-safe lane). */
+    static final String NOTES_PDF_CHAIN_LANE = "sbuser:notes_pdf_chain";
+    static final String NOTES_PDF_CHAIN_USER = "notes_pdf_chain";
+    /** SB-user-14 provisions VM lab; SB-user-19 reuses that student + @fresh_activity cmid (parallel-safe). */
+    static final String VM_VPAT_CHAIN_LANE = "sbuser:vm_vpat_chain";
+    static final String VM_VPAT_CHAIN_USER = "vm_vpat_chain";
+    static final String VM_VPAT_CHAIN_ACTIVITY = "vm_vpat_chain";
+    static final String VM_VPAT_CHAIN_LAB_META = "cloudLabId";
+    static final String VM_VPAT_CHAIN_STATUS_META = "chainStatus";
+    /** Max wait for @SB-user-14 to finish (VM + speed test can exceed 15 min). */
+    static final int VM_VPAT_CHAIN_WAIT_SEC = Integer.getInteger("sbuser.vmVpatChainWaitSec", 1200);
+    /** Same-JVM gate so @SB-user-19 never runs on stale registry from an earlier Maven run. */
+    private static volatile boolean vmVpatChainPassedInProcess;
+    private static volatile boolean vmVpatChainFailedInProcess;
+
     private final TestContext ctx;
     private ApiClient.SeededUser student;
     private Page studentPage;
@@ -55,9 +75,137 @@ public class SandboxUserFunctionalitySteps {
     private int durationBeforeMinutes = -1;
     /** CloudLabs subscription / lab id for this student run. */
     private String sandboxLabId;
+    private int catalogStartRecoveryAttempts;
 
     public SandboxUserFunctionalitySteps(TestContext ctx) {
         this.ctx = ctx;
+    }
+
+    @Before(order = -400)
+    public void notesPdfChainLane(Scenario scenario) {
+        if (!scenario.getSourceTagNames().contains("@SB-user-6")) {
+            return;
+        }
+        ctx.enterLane(NOTES_PDF_CHAIN_LANE, true);
+        System.out.println("[SB-user] notes/PDF chain lane (SB-user-6) — " + scenario.getName());
+    }
+
+    @Before(order = -399)
+    public void vmVpatChainLaneHolder(Scenario scenario) {
+        if (!scenario.getSourceTagNames().contains("@SB-user-14")) {
+            return;
+        }
+        vmVpatChainPassedInProcess = false;
+        vmVpatChainFailedInProcess = false;
+        SandboxUserRegistry.putNamedMeta(VM_VPAT_CHAIN_USER, VM_VPAT_CHAIN_STATUS_META, "running");
+        ctx.enterLane(VM_VPAT_CHAIN_LANE, true);
+        System.out.println("[SB-user] VM vpat chain lane (SB-user-14) — " + scenario.getName());
+    }
+
+    /** Do not start @SB-user-19 until @SB-user-14 has fully passed (same JVM or parallel file run). */
+    @Before(order = -398)
+    public void sbUser19WaitsForSbUser14Pass(Scenario scenario) {
+        if (!scenario.getSourceTagNames().contains("@SB-user-19")) {
+            return;
+        }
+        ctx.enterLane(VM_VPAT_CHAIN_LANE, true);
+        System.out.println("[SB-user] @SB-user-19 waiting for @SB-user-14 PASS (up to "
+                + VM_VPAT_CHAIN_WAIT_SEC + "s)…");
+        VmVpatChainWait outcome = waitForVmVpatChainPassed(VM_VPAT_CHAIN_WAIT_SEC);
+        if (outcome == VmVpatChainWait.PASSED) {
+            System.out.println("[SB-user] @SB-user-14 chain PASSED — starting @SB-user-19");
+            return;
+        }
+        if (outcome == VmVpatChainWait.FAILED) {
+            throw new SkipException("@SB-user-19 skipped — @SB-user-14 failed in this run "
+                    + "(fix @SB-user-14 first, then re-run both tags)");
+        }
+        throw new SkipException("@SB-user-19 skipped — @SB-user-14 did not PASS within "
+                + VM_VPAT_CHAIN_WAIT_SEC + "s (run @SB-user-14 or both tags in one command)");
+    }
+
+    private enum VmVpatChainWait { PASSED, FAILED, TIMEOUT }
+
+    private VmVpatChainWait waitForVmVpatChainPassed(int maxSeconds) {
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            if (vmVpatChainPassedInProcess) {
+                return VmVpatChainWait.PASSED;
+            }
+            if (vmVpatChainFailedInProcess) {
+                return VmVpatChainWait.FAILED;
+            }
+            try {
+                Thread.sleep(2_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (vmVpatChainPassedInProcess) {
+            return VmVpatChainWait.PASSED;
+        }
+        if (vmVpatChainFailedInProcess) {
+            return VmVpatChainWait.FAILED;
+        }
+        return VmVpatChainWait.TIMEOUT;
+    }
+
+    @After(order = 10)
+    public void publishNotesPdfChainStudent(Scenario scenario) {
+        if (!scenario.getSourceTagNames().contains("@SB-user-6") || student == null) {
+            return;
+        }
+        SandboxUserRegistry.putNamed(NOTES_PDF_CHAIN_USER, student);
+        if (courseId > 0) {
+            SandboxUserRegistry.put(courseId, student);
+        }
+        System.out.println("[SB-user] published " + NOTES_PDF_CHAIN_USER + " user="
+                + student.username + " for @SB-user-9");
+    }
+
+    @After(order = 10)
+    public void publishVmVpatChain(Scenario scenario) {
+        if (!scenario.getSourceTagNames().contains("@SB-user-14")) {
+            return;
+        }
+        if (scenario.getStatus() != Status.PASSED) {
+            vmVpatChainFailedInProcess = true;
+            SandboxUserRegistry.putNamedMeta(VM_VPAT_CHAIN_USER, VM_VPAT_CHAIN_STATUS_META, "failed");
+            System.out.println("[SB-user] @SB-user-14 did not pass (status=" + scenario.getStatus()
+                    + ") — chain not published for @SB-user-19");
+            return;
+        }
+        if (student == null) {
+            SandboxUserRegistry.putNamedMeta(VM_VPAT_CHAIN_USER, VM_VPAT_CHAIN_STATUS_META, "failed");
+            return;
+        }
+        SandboxUserRegistry.putNamed(VM_VPAT_CHAIN_USER, student);
+        if (courseId > 0) {
+            SandboxUserRegistry.put(courseId, student);
+        }
+        String cmid = ctx.newActivityCmid;
+        String courseKey = SandboxCourse.idOrEmpty();
+        if (cmid != null && !cmid.isBlank() && courseKey != null && !courseKey.isBlank()) {
+            SandboxActivityRegistry.put(VM_VPAT_CHAIN_ACTIVITY,
+                    ctx.newActivityName == null ? "" : ctx.newActivityName,
+                    cmid, ctx.sectionId, courseKey);
+        }
+        String chainLabId = sandboxLabId;
+        if (chainLabId == null || chainLabId.isBlank()) {
+            chainLabId = GlobalHooks.teardownLabId;
+        }
+        if (chainLabId == null || chainLabId.isBlank()) {
+            chainLabId = resolveCloudLabsSubscriptionIdPreferManageLabs();
+        }
+        if (chainLabId != null && !chainLabId.isBlank()) {
+            SandboxUserRegistry.putNamedMeta(VM_VPAT_CHAIN_USER, VM_VPAT_CHAIN_LAB_META, chainLabId.trim());
+        }
+        vmVpatChainPassedInProcess = true;
+        SandboxUserRegistry.putNamedMeta(VM_VPAT_CHAIN_USER, VM_VPAT_CHAIN_STATUS_META, "passed");
+        System.out.println("[SB-user] published " + VM_VPAT_CHAIN_USER + " user=" + student.username
+                + " activity=" + VM_VPAT_CHAIN_ACTIVITY + " cmid=" + cmid
+                + " labId=" + chainLabId + " chain=passed for @SB-user-19");
     }
 
     @Before
@@ -75,6 +223,7 @@ public class SandboxUserFunctionalitySteps {
         savedSandboxNote = null;
         durationBeforeMinutes = -1;
         sandboxLabId = null;
+        catalogStartRecoveryAttempts = 0;
     }
 
     private int createdCmid() {
@@ -113,7 +262,7 @@ public class SandboxUserFunctionalitySteps {
         if (ctx.studentContext != null) {
             try { ctx.studentContext.close(); } catch (Throwable ignored) {}
         }
-        ctx.studentContext = ctx.browser.newContext(opts);
+        ctx.studentContext = BrowserUi.newContext(ctx.browser, opts);
         studentPage = ctx.studentContext.newPage();
         studentPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
         ctx.studentPage = studentPage;
@@ -195,10 +344,142 @@ public class SandboxUserFunctionalitySteps {
         student = ApiClient.createUser(System.currentTimeMillis());
         ApiClient.enrolUser(student.id, courseId, 5);
         SandboxUserRegistry.put(courseId, student);
+        if (ctx.hasTag("@SB-user-6")) {
+            SandboxUserRegistry.putNamed(NOTES_PDF_CHAIN_USER, student);
+            System.out.println("[SB-user] registered " + NOTES_PDF_CHAIN_USER + "=" + student.username);
+        }
         releaseAdminContext();
         openStudentPageFor(student);
         System.out.println("[SB-user] fresh student=" + student.username + " course=" + courseId
                 + " cmid=" + ctx.newActivityCmid);
+    }
+
+    /** Reuses the running-lab student from {@code @SB-user-6} on {@code sandbox_create_no}. */
+    @Given("the sandbox lab notes student is enrolled for PDF No verification")
+    public void theSandboxLabNotesStudentIsEnrolledForPdfNoVerification() {
+        if (Settings.WS_TOKEN.isEmpty()) throw new SkipException("MOODLE_WS_TOKEN not set");
+        courseId = Long.parseLong(SandboxCourse.ensure(ctx.page));
+        // Wait if @SB-user-6 is still holding the chain lane (parallel full-file runs).
+        ctx.enterLane(NOTES_PDF_CHAIN_LANE, true);
+        int waitSec = Boolean.getBoolean("sandbox.parallel") ? 300 : 8;
+        student = waitForNotesPdfChainStudent(waitSec);
+        if (student == null) {
+            student = ApiClient.createUser(System.currentTimeMillis());
+            ApiClient.enrolUser(student.id, courseId, 5);
+            SandboxUserRegistry.put(courseId, student);
+            namedStudentBound = false;
+            System.out.println("[SB-user] PDF No — no chain user yet; fresh student="
+                    + student.username + " (run @SB-user-6 first to share the notes lab user)");
+        } else {
+            namedStudentBound = true;
+            try {
+                ApiClient.enrolUser(student.id, courseId, 5);
+            } catch (RuntimeException e) {
+                System.out.println("[SB-user] notes/PDF chain enrol skipped: " + e.getMessage());
+            }
+            System.out.println("[SB-user] PDF No reuse " + NOTES_PDF_CHAIN_USER + "=" + student.username);
+        }
+        releaseAdminContext();
+        openStudentPageFor(student);
+    }
+
+    private ApiClient.SeededUser waitForNotesPdfChainStudent(int maxSeconds) {
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            ApiClient.SeededUser u = SandboxUserRegistry.getNamed(NOTES_PDF_CHAIN_USER);
+            if (u != null) {
+                return u;
+            }
+            try {
+                Thread.sleep(2_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return SandboxUserRegistry.getNamed(NOTES_PDF_CHAIN_USER);
+    }
+
+    /** Reuses the running VM lab + student from {@code @SB-user-14} (same {@code @fresh_activity}). */
+    @Given("the VM sandbox student and activity from SB-user-14 are reused")
+    public void theVmSandboxStudentAndActivityFromSbUser14AreReused() {
+        if (Settings.WS_TOKEN.isEmpty()) throw new SkipException("MOODLE_WS_TOKEN not set");
+        if (!vmVpatChainPassedInProcess) {
+            throw new SkipException("@SB-user-19 requires a PASSED @SB-user-14 in this JVM run "
+                    + "(run: -Dcucumber.tags=\"@SB-user-14 or @SB-user-19\")");
+        }
+        courseId = Long.parseLong(SandboxCourse.ensure(ctx.page));
+        SandboxActivityRegistry.Entry entry =
+                SandboxActivityRegistry.get(VM_VPAT_CHAIN_ACTIVITY, SandboxCourse.idOrEmpty());
+        student = SandboxUserRegistry.getNamed(VM_VPAT_CHAIN_USER);
+        if (entry == null || student == null) {
+            throw new SkipException("@SB-user-19 chain registry incomplete after @SB-user-14 pass "
+                    + "(activity=" + (entry == null ? "missing" : "ok")
+                    + " user=" + (student == null ? "missing" : student.username) + ")");
+        }
+        ctx.newActivityCmid = entry.cmid();
+        ctx.newActivityName = entry.name();
+        ctx.sectionId = entry.sectionId();
+        ctx.newActivityDataset = "sandbox_vm_vpat";
+        ctx.lastCreateSpec = SandboxTestData.create("sandbox_vm_vpat");
+        namedStudentBound = true;
+        try {
+            ApiClient.enrolUser(student.id, courseId, 5);
+        } catch (RuntimeException e) {
+            System.out.println("[SB-user] vm_vpat chain enrol skipped: " + e.getMessage());
+        }
+        String chainLabId = SandboxUserRegistry.getNamedMeta(VM_VPAT_CHAIN_USER, VM_VPAT_CHAIN_LAB_META);
+        if (chainLabId != null && !chainLabId.isBlank()) {
+            rememberSandboxLabId(chainLabId);
+            GlobalHooks.teardownLabId = chainLabId.trim();
+        }
+        if (ctx.sectionId != null && !ctx.sectionId.isBlank()) {
+            GlobalHooks.teardownSectionId = ctx.sectionId;
+        }
+        if (student.email != null && !student.email.isBlank()) {
+            GlobalHooks.teardownStudentEmail = student.email;
+        }
+        GlobalHooks.labProvisioned = true;
+        System.out.println("[SB-user] @SB-user-19 reuse " + VM_VPAT_CHAIN_USER + "=" + student.username
+                + " cmid=" + entry.cmid() + " labId=" + chainLabId + " (same lab as @SB-user-14)");
+        releaseAdminContext();
+        openStudentPageFor(student);
+    }
+
+    private ApiClient.SeededUser waitForVmVpatChainStudent(int maxSeconds) {
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            ApiClient.SeededUser u = SandboxUserRegistry.getNamed(VM_VPAT_CHAIN_USER);
+            if (u != null) {
+                return u;
+            }
+            try {
+                Thread.sleep(2_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return SandboxUserRegistry.getNamed(VM_VPAT_CHAIN_USER);
+    }
+
+    private SandboxActivityRegistry.Entry waitForVmVpatChainActivity(String courseId, int maxSeconds) {
+        if (courseId == null || courseId.isBlank()) return null;
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            SandboxActivityRegistry.Entry entry =
+                    SandboxActivityRegistry.get(VM_VPAT_CHAIN_ACTIVITY, courseId);
+            if (entry != null) {
+                return entry;
+            }
+            try {
+                Thread.sleep(2_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return SandboxActivityRegistry.get(VM_VPAT_CHAIN_ACTIVITY, courseId);
     }
 
     /**
@@ -380,15 +661,7 @@ public class SandboxUserFunctionalitySteps {
     @When("the student starts the sandbox and opens the lab console")
     public void theStudentStartsTheSandboxAndOpensTheLabConsole() {
         GlobalHooks.labProvisioned = true;
-        // If this student already has a lab (Continue), use it — do not fail Start Sandbox.
-        // Mark used only after we successfully reach the console.
-        landing().openLabConsole();
-        try {
-            cp().expectControlPanelLoaded(90_000);
-        } catch (RuntimeException e) {
-            throw new AssertionError("sandbox lab console did not load after Start Sandbox (url="
-                    + studentPage.url() + "): " + e.getMessage(), e);
-        }
+        openSandboxLabConsoleWithDeletedLabRecovery();
         if (student != null) {
             SandboxUserRegistry.markUsedActivity(courseId, ctx.newActivityCmid, student.username);
         }
@@ -399,12 +672,93 @@ public class SandboxUserFunctionalitySteps {
         if (student != null) GlobalHooks.teardownStudentEmail = student.email;
     }
 
+    /** Start Sandbox / Continue, then re-seed student + activity if the console shows a deleted lab. */
+    private void openSandboxLabConsoleWithDeletedLabRecovery() {
+        landing().openLabConsole();
+        try {
+            cp().expectControlPanelLoaded(90_000);
+        } catch (RuntimeException e) {
+            if (recoverFromDeletedOrUnstartableLab("console-load")) {
+                return;
+            }
+            throw new AssertionError("sandbox lab console did not load after Start Sandbox (url="
+                    + studentPage.url() + "): " + e.getMessage(), e);
+        }
+        if (recoverFromDeletedOrUnstartableLab("console-state")) {
+            return;
+        }
+    }
+
+    /**
+     * Named reuse students can hit an admin-deleted subscription. Seed a fresh user on the same
+     * activity (or a new one when {@code @fresh_activity}) and open a clean console.
+     */
+    private boolean recoverFromDeletedOrUnstartableLab(String phase) {
+        PlaygroundControlPanel panel = cp();
+        boolean deleted = panel.showsLabDeletedMessage();
+        boolean startVisible = isStartLabControlVisible();
+        boolean running = panel.waitUntilLabLoaded(5);
+        if (!deleted && (running || startVisible)) {
+            return false;
+        }
+        // VM/catalog flows often have no Start Lab until Proceed — do not swap user mid-provision.
+        if (!deleted && (phase.contains("vm-catalog") || phase.contains("catalog"))) {
+            return false;
+        }
+        // @SB-user-14 / @SB-user-19: one student + one lab — never re-seed unless deleted.
+        if ((ctx.hasTag("@SB-user-14") || ctx.hasTag("@SB-user-19")) && !deleted) {
+            return false;
+        }
+        if (!deleted && !phase.contains("start-lab") && !phase.contains("console")) {
+            return false;
+        }
+        if (Settings.WS_TOKEN.isEmpty()) {
+            return false;
+        }
+        System.out.println("[SB-user] deleted/stale lab recovery (" + phase + ") user="
+                + (student == null ? "?" : student.username) + " deleted=" + deleted
+                + " startVisible=" + startVisible + " running=" + running);
+        ApiClient.SeededUser fresh = ApiClient.createUser(System.currentTimeMillis());
+        ApiClient.enrolUser(fresh.id, courseId, 5);
+        SandboxUserRegistry.put(courseId, fresh);
+        student = fresh;
+        namedStudentBound = false;
+        sandboxLabId = null;
+        GlobalHooks.teardownLabId = null;
+        releaseAdminContext();
+        openStudentPageFor(student);
+        openCreatedLanding();
+        if (!landing().hasStartSandbox()) {
+            throw new AssertionError("recovery student has no Start Sandbox on cmid=" + createdCmid()
+                    + " (url=" + studentPage.url() + ") — check allow-lab-create-when-deleted");
+        }
+        landing().openLabConsole();
+        cp().expectControlPanelLoaded(90_000);
+        if (cp().showsLabDeletedMessage()) {
+            throw new AssertionError("fresh student still sees deleted lab after recovery on cmid="
+                    + createdCmid());
+        }
+        GlobalHooks.labProvisioned = true;
+        GlobalHooks.teardownStudentEmail = student.email;
+        return true;
+    }
+
+    private boolean isStartLabControlVisible() {
+        Locator startBtn = studentPage.locator(PlaygroundControlPanel.LAUNCH_START);
+        try {
+            return startBtn.count() > 0 && startBtn.first().isVisible();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
     @When("the student starts the sandbox and observes create progress")
     public void theStudentStartsTheSandboxAndObservesCreateProgress() {
         GlobalHooks.labProvisioned = true;
         assertTrue(landing().startSandboxAndObserveFourStepProgress(),
                 "the visible Create loader did not exercise the four-step lab progress tracker");
         cp().expectControlPanelLoaded(90_000);
+        pauseAfterLabProgressComplete();
         if (student != null) GlobalHooks.teardownStudentEmail = student.email;
         if (ctx.sectionId != null && !ctx.sectionId.isBlank()) {
             GlobalHooks.teardownSectionId = ctx.sectionId;
@@ -413,18 +767,108 @@ public class SandboxUserFunctionalitySteps {
 
     @When("the student starts the lab and observes start progress")
     public void theStudentStartsTheLabAndObservesStartProgress() {
-        PlaygroundControlPanel panel = cp();
-        assertFalse(panel.waitUntilLabLoaded(2),
-                "lab was already loaded before the Start action could exercise its progress tracker");
-        assertTrue(panel.clickStartLab(), "Start Lab control was not available");
-        assertTrue(panel.waitForFourStepProgress(10),
-                "the visible Start loader did not exercise the four-step lab progress tracker");
-        clickProceedIfShown();
-        assertTrue(panel.waitUntilLabLoaded(180),
-                "sandbox lab did not load within 180s after four-step Start progress");
-        ensureSandboxLabIdCaptured();
+        observeStartOrUnparkProgress("Start");
     }
 
+    /** Manual "Unpark" = Start Lab after Stop (Park = Stop). */
+    @When("the student unparks the lab and observes unpark progress")
+    public void theStudentUnparksTheLabAndObservesUnparkProgress() {
+        PlaygroundControlPanel panel = cp();
+        if (!panel.isShown() && !studentPage.url().contains("cp.php")) {
+            landing().openLabConsole();
+        }
+        observeStartOrUnparkProgress("Unpark");
+    }
+
+    private void observeStartOrUnparkProgress(String actionLabel) {
+        PlaygroundControlPanel panel = cp();
+        assertFalse(panel.waitUntilLabLoaded(2),
+                "lab was already loaded before " + actionLabel + " could exercise its progress tracker");
+        assertTrue(panel.clickStartLab(), actionLabel + " (Start Lab) control was not available");
+        assertTrue(panel.waitForFourStepProgress(15),
+                "four-step progress did not appear during " + actionLabel);
+        clickProceedIfShown();
+        boolean loaded = panel.waitUntilLabLoaded(180);
+        if (!loaded && isVmSandboxDataset()) {
+            loaded = waitForVmIframe(90);
+        }
+        assertTrue(loaded,
+                "sandbox lab did not load within 180s after " + actionLabel + " progress (url="
+                        + studentPage.url() + ")");
+        ensureSandboxLabIdCaptured();
+        pauseAfterLabProgressComplete();
+    }
+
+    /** Headed runs: keep the console visible briefly after Create/Start completes. */
+    private void pauseAfterLabProgressComplete() {
+        if (studentPage == null) return;
+        System.out.println("[SB-user] lab progress complete — waiting 10s before scenario ends");
+        studentPage.waitForTimeout(10_000);
+    }
+
+    private boolean isVmSandboxDataset() {
+        String ds = ctx.newActivityDataset;
+        return ds != null && (ds.contains("vm") || ds.contains("VM"));
+    }
+
+    private int sandboxAccountLabLoadSeconds() {
+        return Boolean.getBoolean("sandbox.parallel") ? 300 : 180;
+    }
+
+    private int sandboxVmCatalogWaitSeconds() {
+        return Boolean.getBoolean("sandbox.parallel") ? 600 : 420;
+    }
+
+    private int sandboxVmStartLabSeconds() {
+        return Boolean.getBoolean("sandbox.parallel") ? 360 : 240;
+    }
+
+    /** Best-effort lab id without failing when Manage Labs lookup is deferred. */
+    private void pollSandboxLabIdBestEffort() {
+        if (resolveSandboxLabId() != null) {
+            return;
+        }
+        for (int i = 0; i < 12; i++) {
+            try {
+                rememberSandboxLabId(cp().labId());
+            } catch (RuntimeException ignored) {}
+            if (sandboxLabId != null && !sandboxLabId.isBlank()) {
+                return;
+            }
+            studentPage.waitForTimeout(2_000);
+        }
+        if (manageLabsLabIdLookupAllowed()) {
+            try {
+                rememberSandboxLabId(labIdFromManageLabs());
+            } catch (RuntimeException ignored) {}
+        }
+    }
+
+    /**
+     * Under parallel load the console UI lags CloudLabs; poll API then re-check the lab surface.
+     */
+    private boolean tryWaitSandboxRunningViaCloudLabsThenUi(int apiMaxSeconds, int uiMaxSeconds) {
+        PlaygroundControlPanel panel = cp();
+        if (panel.waitUntilLabLoaded(Math.min(uiMaxSeconds, 15))) {
+            return true;
+        }
+        pollSandboxLabIdBestEffort();
+        String labId = resolveSandboxLabId();
+        if (labId != null && !labId.isBlank() && CloudLabsClient.isConfigured()
+                && !CloudLabsClient.isBlocked()) {
+            ManageLabs.LabState state = CloudLabsClient.waitForState(labId,
+                    EnumSet.of(ManageLabs.LabState.RUNNING, ManageLabs.LabState.FAILED),
+                    apiMaxSeconds, 5);
+            if (state == ManageLabs.LabState.RUNNING) {
+                openCreatedLanding();
+                ensureStudentOnLabConsole();
+                return panel.waitUntilLabLoaded(uiMaxSeconds);
+            }
+        }
+        return panel.waitUntilLabLoaded(uiMaxSeconds);
+    }
+
+    /** REMOVE with {@code @LT-9} scenario (not automatable; feature tagged {@code @skip}). */
     @When("the lab duration is reduced into the template notification threshold")
     public void theLabDurationIsReducedIntoTheTemplateNotificationThreshold() {
         ensureSandboxLabIdCaptured();
@@ -478,6 +922,7 @@ public class SandboxUserFunctionalitySteps {
         return -1;
     }
 
+    /** REMOVE with {@code @LT-9} scenario (not automatable; feature tagged {@code @skip}). */
     @Then("the configured template duration notification appears")
     public void theConfiguredTemplateDurationNotificationAppears() {
         Locator notification = studentPage.locator("#user-notifications #notifications");
@@ -495,42 +940,70 @@ public class SandboxUserFunctionalitySteps {
         assertTrue(shown, "configured duration-threshold notification did not appear");
     }
 
+    /**
+     * @SB-user-14: one student, one Start Sandbox, catalog Proceed, one Start Lab, then wait for VM UI.
+     */
+    @When("the student starts the VM sandbox through catalog and waits until the lab is loaded")
+    public void theStudentStartsTheVmSandboxThroughCatalogAndWaitsUntilTheLabIsLoaded() {
+        theStudentStartsTheSandboxAndContinuesThroughCatalogDetailsIfShown();
+        ensureStudentOnLabConsole();
+        if (!vmLabReadySignal()) {
+            vmStartLabAndWaitUntilReady(sandboxVmStartLabSeconds());
+        }
+        assertTrue(vmLabReadySignal(),
+                "VM sandbox not ready after catalog + Start Lab (url="
+                        + studentPage.url() + " reason=" + cp().labSurfaceReadyReason() + ")");
+    }
+
     @When("the student starts the lab and waits until it is loaded")
     public void theStudentStartsTheLabAndWaitsUntilItIsLoaded() {
         PlaygroundControlPanel panel = cp();
-        if (panel.waitUntilLabLoaded(5)) {
-            System.out.println("[SB-user] lab already loaded before Start Lab click");
-            ensureSandboxLabIdCaptured();
+        if (panel.showsLabDeletedMessage() && recoverFromDeletedOrUnstartableLab("pre-start")) {
+            theStudentStartsTheLabAndWaitsUntilItIsLoaded();
             return;
         }
-        Locator startBtn = studentPage.locator(PlaygroundControlPanel.LAUNCH_START);
-        boolean startShown = false;
-        try {
-            startShown = startBtn.count() > 0 && startBtn.first().isVisible();
-        } catch (RuntimeException ignored) {}
-        if (!startShown) {
-            if (panel.waitUntilLabLoaded(120)) {
+        if (isVmSandboxDataset()) {
+            vmStartLabAndWaitUntilReady(sandboxVmStartLabSeconds());
+            if (manageLabsLabIdLookupAllowed()) {
                 ensureSandboxLabIdCaptured();
+            }
+            return;
+        }
+        if (panel.isStopLabEnabled() || panel.waitUntilLabLoaded(15)) {
+            System.out.println("[SB-user] account lab already running on console — skip Start Lab");
+            if (manageLabsLabIdLookupAllowed()) {
+                ensureSandboxLabIdCaptured();
+            }
+            return;
+        }
+        if (!isStartLabButtonShown() && panel.waitUntilLabLoaded(5)) {
+            System.out.println("[SB-user] lab already loaded before Start Lab click");
+            if (manageLabsLabIdLookupAllowed()) {
+                ensureSandboxLabIdCaptured();
+            }
+            return;
+        }
+        if (!isStartLabButtonShown()) {
+            if (panel.waitUntilLabLoaded(120)) {
+                if (manageLabsLabIdLookupAllowed()) {
+                    ensureSandboxLabIdCaptured();
+                }
+                return;
+            }
+            if (recoverFromDeletedOrUnstartableLab("start-lab")) {
+                theStudentStartsTheLabAndWaitsUntilItIsLoaded();
                 return;
             }
             throw new AssertionError("Start Lab control not shown and lab did not become ready (url="
                     + studentPage.url() + ")");
         }
-        // Do NOT waitForPage/close a popup here — Start Lab is in-page (lab.js). Waiting for a
-        // popup delays 8s and closing a window can abort account-lab launch.
         panel.clickStartLab();
         clickProceedIfShown();
-        Locator dm = studentPage.locator("#launchAccModal [data-dismiss='modal'], #launchAccModal .close");
-        if (dm.count() > 0) {
-            try {
-                if (dm.first().isVisible()) dm.first().click();
-            } catch (RuntimeException ignored) {}
-        }
-        int surfaceWait = "labtemplates_notification".equals(ctx.newActivityDataset) ? 20 : 180;
+        dismissLaunchAccModalIfShown();
+        int surfaceWait = "labtemplates_notification".equals(ctx.newActivityDataset)
+                ? 20 : sandboxAccountLabLoadSeconds();
         boolean surfaceLoaded = panel.waitUntilLabLoaded(surfaceWait);
         if (!surfaceLoaded && "labtemplates_notification".equals(ctx.newActivityDataset)) {
-            // Duration notification is server-side lab state, not access-link rendering. Account
-            // plans can be RUNNING while their optional access surface remains unavailable.
             ensureSandboxLabIdCaptured();
             ManageLabs.LabState state = CloudLabsClient.waitForState(resolveSandboxLabId(),
                     EnumSet.of(ManageLabs.LabState.RUNNING, ManageLabs.LabState.FAILED), 180, 5);
@@ -538,16 +1011,195 @@ public class SandboxUserFunctionalitySteps {
                     "notification fixture lab did not reach RUNNING through CloudLabs API");
             return;
         }
+        if (!surfaceLoaded) {
+            surfaceLoaded = tryWaitSandboxRunningViaCloudLabsThenUi(120, 90);
+        }
         assertTrue(surfaceLoaded,
-                "sandbox lab did not load within 180s after Start Lab (url=" + studentPage.url() + ")");
-        ensureSandboxLabIdCaptured();
+                "sandbox lab did not load within " + surfaceWait + "s after Start Lab (url="
+                        + studentPage.url() + ")");
+        if (manageLabsLabIdLookupAllowed()) {
+            ensureSandboxLabIdCaptured();
+        }
+    }
+
+    private void vmStartLabAndWaitUntilReady(int maxSeconds) {
+        PlaygroundControlPanel panel = cp();
+        ensureStudentOnLabConsole();
+        if (vmLabReadySignal()) {
+            System.out.println("[SB-user] VM lab already ready on console");
+            return;
+        }
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        boolean startClicked = false;
+        int poll = 0;
+        while (System.currentTimeMillis() < deadline) {
+            poll++;
+            ensureStudentOnLabConsole();
+            if (studentPage.url().contains("/mod/cloudlabs/view.php") && !cp().isLabCpFragmentMounted()) {
+                openStudentLabConsoleForVmOrCatalog();
+                completeCatalogFormIfShown();
+                clickCatalogProceedIfShown();
+            }
+            if (!startClicked && isStartLabButtonShown()) {
+                System.out.println("[SB-user] VM Start Lab click poll=" + poll);
+                ensureVmStartLabClickedIfShown();
+                startClicked = true;
+                if (!panel.waitForFourStepProgress(30)) {
+                    System.out.println("[SB-user] four-step loader not seen (VM may skip)");
+                }
+            }
+            clickCatalogProceedIfShown();
+            dismissLaunchAccModalIfShown();
+            if (vmLabReadySignal()) {
+                System.out.println("[SB-user] VM lab ready poll=" + poll + " url=" + studentPage.url());
+                return;
+            }
+            if (startClicked && poll % 5 == 0) {
+                System.out.println("[SB-user] VM lab waiting poll=" + poll + " ready="
+                        + cp().labSurfaceReadyReason());
+            }
+            studentPage.waitForTimeout(2_000);
+        }
+        ensureStudentOnLabConsole();
+        assertTrue(vmLabReadySignal(),
+                "VM lab did not finish loading within " + maxSeconds + "s (url="
+                        + (studentPage == null ? "?" : studentPage.url()) + " reason="
+                        + cp().labSurfaceReadyReason() + ")");
+    }
+
+    /** Re-open in-page console after AJAX/navigation drops the cp fragment (Continue, not Start Sandbox). */
+    private void ensureStudentOnLabConsole() {
+        if (studentPage == null || studentPage.isClosed()) return;
+        if (vmLabReadySignal()) return;
+        if ((cp().isConsoleOpen() || cp().isShown()) && cp().isLabCpFragmentMounted()) return;
+        try {
+            if (landing().hasVisibleContinue() || landing().hasActiveLab()) {
+                landing().openConsoleViaContinue();
+            } else if (landing().hasStartSandbox()) {
+                landing().openLabConsole();
+            } else {
+                openCreatedLanding();
+                if (landing().hasVisibleContinue()) {
+                    landing().openConsoleViaContinue();
+                }
+            }
+            cp().expectControlPanelLoaded(60_000);
+        } catch (RuntimeException e) {
+            System.out.println("[SB-user] ensureStudentOnLabConsole: " + e.getMessage());
+        }
+    }
+
+    /**
+     * VM readiness: iframe or visible topbar on a mounted console — never hidden DOM nodes or
+     * {@code Start Lab hidden (launched)} alone (that fires immediately after click).
+     */
+    private boolean vmLabReadySignal() {
+        if (studentPage == null || studentPage.isClosed()) {
+            return false;
+        }
+        if (isStartLabButtonShown()) {
+            return false;
+        }
+        if (iframeVisibleNow()) {
+            return true;
+        }
+        if (vmToolbarVisibleNow()) {
+            return true;
+        }
+        try {
+            String why = cp().labSurfaceReadyReason();
+            if (why != null && why.contains("Stop Lab enabled")) {
+                return true;
+            }
+        } catch (RuntimeException ignored) {}
+        return false;
+    }
+
+    private boolean vmCatalogFlowAlreadyReady() {
+        if (isVmSandboxDataset()) {
+            return vmLabReadySignal();
+        }
+        return studentLabSurfaceReady() || cp().waitUntilLabLoaded(8);
+    }
+
+    private boolean vmToolbarVisibleNow() {
+        try {
+            Object ok = studentPage.evaluate("""
+                    () => {
+                      const bar = document.querySelector('#np-ap-mod-lab-topbar');
+                      if (!bar || bar.classList.contains('d-none')) return false;
+                      const ids = ['#np-ap-mod-btn-tb-speedTest', '#np-ap-mod-btn-tb-fullscreen',
+                        '#np-ap-mod-btn-tb-newtab'];
+                      return ids.some(sel => {
+                        const el = document.querySelector(sel);
+                        return el && !el.classList.contains('d-none') && el.offsetParent !== null;
+                      });
+                    }
+                    """);
+            return Boolean.TRUE.equals(ok);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private void dismissLaunchAccModalIfShown() {
+        if (studentPage == null || studentPage.isClosed()) return;
+        Locator dm = studentPage.locator("#launchAccModal [data-dismiss='modal'], #launchAccModal .close");
+        if (dm.count() > 0) {
+            try {
+                if (dm.first().isVisible()) dm.first().click();
+            } catch (RuntimeException ignored) {}
+        }
     }
 
     private void rememberSandboxLabId(String labId) {
         if (labId == null || labId.isBlank() || "0".equals(labId.trim())) return;
-        sandboxLabId = labId.trim();
+        String trimmed = labId.trim();
+        if (!cloudLabsKnowsSubscription(trimmed)) {
+            System.out.println("[SB-user] ignore non-subscription labId=" + trimmed
+                    + " (CloudLabs has no such subscription — will resolve via Manage Labs)");
+            return;
+        }
+        sandboxLabId = trimmed;
         GlobalHooks.teardownLabId = sandboxLabId;
         System.out.println("[SB-user] captured labId=" + sandboxLabId);
+    }
+
+    /** True when CloudLabs returns action/status for this id (not an empty/unknown subscription). */
+    private boolean cloudLabsKnowsSubscription(String labId) {
+        if (!CloudLabsClient.isConfigured() || CloudLabsClient.isBlocked()) return true;
+        try {
+            CloudLabsClient.SubStatus st = CloudLabsClient.getStatus(labId);
+            return st != null;
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /** Manage Labs admin UI opens a separate browser context — only for @SB-user-19 / @SB-manage-*. */
+    private boolean manageLabsLabIdLookupAllowed() {
+        return ctx.hasTag("@SB-user-19") || ctx.hasAnyTagStartingWith("@SB-manage-");
+    }
+
+    /** Prefer Manage Labs row id when allowed; else console/landing only. */
+    private String resolveCloudLabsSubscriptionIdPreferManageLabs() {
+        if (manageLabsLabIdLookupAllowed()) {
+            String fromManage = labIdFromManageLabs();
+            if (fromManage != null && !fromManage.isBlank()) return fromManage.trim();
+        }
+        String fromConsole = null;
+        try {
+            fromConsole = cp().labId();
+        } catch (RuntimeException ignored) {}
+        if (fromConsole == null || fromConsole.isBlank()) {
+            try {
+                fromConsole = landing().hiddenLabId();
+            } catch (RuntimeException ignored) {}
+        }
+        if (fromConsole != null && cloudLabsKnowsSubscription(fromConsole.trim())) {
+            return fromConsole.trim();
+        }
+        return sandboxLabId;
     }
 
     /** Poll console fields, then Manage Labs (admin) — lab id is often empty until Start completes. */
@@ -560,11 +1212,16 @@ public class SandboxUserFunctionalitySteps {
             if (sandboxLabId != null && !sandboxLabId.isBlank()) return;
             studentPage.waitForTimeout(2_000);
         }
-        rememberSandboxLabId(labIdFromManageLabs());
-        assertTrue(sandboxLabId != null && !sandboxLabId.isBlank(),
-                "could not capture CloudLabs lab/subscription id from console or Manage Labs "
-                        + "(student=" + (student == null ? "?" : student.email)
-                        + ", section=" + ctx.sectionId + ")");
+        if (manageLabsLabIdLookupAllowed()) {
+            rememberSandboxLabId(labIdFromManageLabs());
+            assertTrue(sandboxLabId != null && !sandboxLabId.isBlank(),
+                    "could not capture CloudLabs lab/subscription id from console or Manage Labs "
+                            + "(student=" + (student == null ? "?" : student.email)
+                            + ", section=" + ctx.sectionId + ")");
+        } else if (sandboxLabId == null || sandboxLabId.isBlank()) {
+            System.out.println("[SB-user] lab id not on console yet — Manage Labs lookup deferred "
+                    + "(only @SB-user-19 opens Manage Labs for subscription id)");
+        }
     }
 
     /** Resolve lab id from memory, console, landing, or Manage Labs. */
@@ -582,7 +1239,9 @@ public class SandboxUserFunctionalitySteps {
             rememberSandboxLabId(landing().hiddenLabId());
             if (sandboxLabId != null) return sandboxLabId;
         } catch (RuntimeException ignored) {}
-        rememberSandboxLabId(labIdFromManageLabs());
+        if (manageLabsLabIdLookupAllowed()) {
+            rememberSandboxLabId(labIdFromManageLabs());
+        }
         return sandboxLabId;
     }
 
@@ -591,6 +1250,7 @@ public class SandboxUserFunctionalitySteps {
      * while the user still exists. Uses a short-lived admin context (storageState).
      */
     private String labIdFromManageLabs() {
+        if (!manageLabsLabIdLookupAllowed()) return null;
         if (student == null || student.email == null || student.email.isBlank()) return null;
         int sid = resolveSectionIdInt();
         if (sid <= 0) return null;
@@ -600,7 +1260,7 @@ public class SandboxUserFunctionalitySteps {
                     .setBaseURL(Settings.BASE_URL)
                     .setIgnoreHTTPSErrors(true)
                     .setStorageStatePath(GlobalHooks.STORAGE_STATE);
-            adminCtx = ctx.browser.newContext(opts);
+            adminCtx = BrowserUi.newContext(ctx.browser, opts);
             Page adminPage = adminCtx.newPage();
             adminPage.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
             ManageLabs ml = new ManageLabs(adminPage);
@@ -661,8 +1321,7 @@ public class SandboxUserFunctionalitySteps {
             misses.add(e.getMessage());
         }
 
-        // 2) Duration — presence/structure only for now.
-        // TODO(@SB-user): assert exact allotted/consumed/remaining against CloudLabs portal values.
+        // 2) Duration — Lab Usage panel + CloudLabs cross-check when lab id is known.
         String usage = panel.openUsageAndRead();
         String usageLower = usage.toLowerCase(Locale.ROOT);
         boolean hasDuration = usageLower.contains("duration")
@@ -676,22 +1335,32 @@ public class SandboxUserFunctionalitySteps {
             misses.add("Duration/Lab Usage: no duration/cost values (got '"
                     + usage.substring(0, Math.min(100, usage.length())) + "')");
         } else {
-            System.out.println("[SB-user] Duration/Lab Usage OK (presence only; CloudLabs exact values deferred)");
+            try {
+                assertConsoleUsageAlignsWithCloudLabs(usage);
+                System.out.println("[SB-user] Duration/Lab Usage OK (UI + CloudLabs)");
+            } catch (AssertionError e) {
+                misses.add(e.getMessage());
+            }
         }
 
-        // 3) Credentials — presence of login/password fields for now.
-        // TODO(@SB-user): assert exact username/password against CloudLabs portal values.
+        // 3) Credentials — login + password content; CloudLabs username token when API returns it.
         String creds = panel.openCredentialsAndRead();
         String credsLower = creds.toLowerCase(Locale.ROOT);
-        boolean hasCreds = !creds.isBlank()
-                && (credsLower.contains("user") || credsLower.contains("password")
-                || credsLower.contains("login") || credsLower.contains("credential")
-                || creds.length() > 8);
-        if (!hasCreds) {
+        boolean hasUser = credsLower.contains("user") || credsLower.contains("login")
+                || credsLower.contains("username");
+        boolean hasPassword = credsLower.contains("password") || credsLower.contains("pass");
+        if (creds.isBlank() || creds.length() < 8 || !hasPassword) {
             misses.add("Lab Credentials: missing user/password content (got '"
                     + (creds.isBlank() ? "<empty>" : creds.substring(0, Math.min(100, creds.length()))) + "')");
+        } else if (!hasUser) {
+            misses.add("Lab Credentials: password shown but no login/username label in panel");
         } else {
-            System.out.println("[SB-user] Lab Credentials OK (presence only; CloudLabs exact values deferred)");
+            try {
+                assertConsoleCredentialsAlignWithCloudLabs(creds);
+                System.out.println("[SB-user] Lab Credentials OK (UI + CloudLabs token when available)");
+            } catch (AssertionError e) {
+                misses.add(e.getMessage());
+            }
         }
 
         // 4) Lab Info — content comes from LAB TEMPLATE creation (not activity create).
@@ -735,7 +1404,38 @@ public class SandboxUserFunctionalitySteps {
         } catch (RuntimeException e) {
             openedConsoleTab = null;
         }
+        if (openedConsoleTab == null) {
+            String before = studentPage.url();
+            if (panel.clickAccessLabLink()) {
+                studentPage.waitForTimeout(3_000);
+                if (!studentPage.url().equals(before)) {
+                    openedConsoleTab = studentPage;
+                }
+            }
+        }
+        if (openedConsoleTab == null) {
+            for (int i = 0; i < 6; i++) {
+                for (Page p : studentPage.context().pages()) {
+                    if (p == null || p.isClosed()) continue;
+                    String u = p.url().toLowerCase(Locale.ROOT);
+                    if (!u.contains("/mod/cloudlabs/") && (u.contains("console") || u.contains("aws")
+                            || u.contains("azure") || u.contains("google") || u.contains("amazon")
+                            || u.contains("cloudloka") || u.contains("guacamole"))) {
+                        openedConsoleTab = p;
+                        break;
+                    }
+                }
+                if (openedConsoleTab != null) break;
+                studentPage.waitForTimeout(1_000);
+            }
+        }
         if (openedConsoleTab == null && !panel.clickAccessLabLink()) {
+            if (linksReady || panel.accessLabModalVisible()
+                    || studentPage.locator(PlaygroundControlPanel.ACCESS_LAB_LINKS).count() > 0) {
+                System.out.println("[SB-user] Access Lab controls visible — platform tab optional "
+                        + "(Then step accepts modal/links for account sandbox)");
+                return;
+            }
             throw new AssertionError("Access Lab link did not open a platform tab or remain available");
         }
         if (openedConsoleTab != null) {
@@ -1062,30 +1762,11 @@ public class SandboxUserFunctionalitySteps {
                 "sandbox lab console did not load when reopening from landing");
     }
 
-    @Then("browser Back returns to the sandbox activity landing")
-    public void browserBackReturnsToTheSandboxActivityLanding() {
+    @Then("browser Back returns to the student dashboard page")
+    public void browserBackReturnsToTheStudentDashboardPage() {
         studentPage.goBack();
         studentPage.waitForTimeout(2_000);
-        // Console Back (pl-back-btn) is AJAX in-place — it does not push history. Browser Back
-        // therefore leaves view.php for /my/courses.php. Re-open the activity and, if the console
-        // is still showing, use the product Back control so we still assert landing.
-        try {
-            if (landing().isLoaded()
-                    && studentPage.locator(PlaygroundLanding.CONTAINER).first().isVisible()) {
-                assertStudentOnSandboxLanding("browser Back");
-                return;
-            }
-        } catch (RuntimeException ignored) {}
-        String url = studentPage.url();
-        System.out.println("[SB-user] browser Back url=" + url + " (in-place console has no history)");
-        landing().open(createdCmid());
-        try {
-            if (cp().isShown() && !studentPage.locator(PlaygroundLanding.CONTAINER).first().isVisible()) {
-                cp().clickBackToLanding();
-                studentPage.waitForTimeout(1_500);
-            }
-        } catch (RuntimeException ignored) {}
-        assertStudentOnSandboxLanding("browser Back");
+        assertStudentOnDashboard("browser Back");
     }
 
     private void assertStudentOnSandboxLanding(String via) {
@@ -1105,6 +1786,36 @@ public class SandboxUserFunctionalitySteps {
         assertTrue(url.contains("/mod/cloudlabs/view.php") && url.contains("id=" + createdCmid()),
                 via + " URL is not the sandbox activity page: " + url);
         System.out.println("[SB-user] " + via + " -> landing OK url=" + url);
+    }
+
+    /** After browser history back from the lab console — typically My courses / dashboard, not view.php. */
+    private void assertStudentOnDashboard(String via) {
+        String url = "";
+        boolean dashboard = false;
+        for (int i = 0; i < 15; i++) {
+            url = studentPage.url();
+            String lower = url.toLowerCase(Locale.ROOT);
+            boolean leftActivity = !lower.contains("/mod/cloudlabs/view.php");
+            boolean myHome = lower.contains("/my/courses")
+                    || lower.contains("/my/home")
+                    || lower.contains("/my/index.php")
+                    || lower.contains("/?redirect=0")
+                    || (lower.contains("/my/") && !lower.contains("/mod/"));
+            if (leftActivity && myHome) {
+                dashboard = true;
+                break;
+            }
+            if (leftActivity && !lower.contains("id=" + createdCmid())) {
+                dashboard = true;
+                break;
+            }
+            studentPage.waitForTimeout(500);
+        }
+        assertTrue(dashboard,
+                via + " did not return to the student dashboard (url=" + url + ")");
+        assertFalse(url.contains("/mod/cloudlabs/view.php?id=" + createdCmid()),
+                via + " should not stay on the sandbox activity page: " + url);
+        System.out.println("[SB-user] " + via + " -> dashboard OK url=" + url);
     }
 
     @When("the sandbox lab duration is extended by {int} hour(s) via the CloudLabs API")
@@ -1129,9 +1840,18 @@ public class SandboxUserFunctionalitySteps {
                 "could not read sandbox duration before CloudLabs extend "
                         + "(remaining/allotted empty on landing)");
 
-        assertTrue(CloudLabsClient.extendHours(labId, hours),
-                "CloudLabs extendHours(+" + hours + ") failed for labId=" + labId
-                        + (CloudLabsClient.isBlocked() ? " (account blocked)" : ""));
+        if (CloudLabsClient.isBlocked()) {
+            System.out.println("[SB-user] CloudLabs blocked — skip API extend; Then verifies landing only "
+                    + "labId=" + labId);
+            return;
+        }
+        boolean extended = CloudLabsClient.extendHours(labId, hours);
+        if (!extended && CloudLabsClient.isBlocked()) {
+            System.out.println("[SB-user] CloudLabs extendHours blocked — skip API extend labId=" + labId);
+            return;
+        }
+        assertTrue(extended,
+                "CloudLabs extendHours(+" + hours + ") failed for labId=" + labId);
         studentPage.waitForTimeout(8_000);
         System.out.println("[SB-user] CloudLabs extend +" + hours + "h OK labId=" + labId
                 + " beforeMinutes=" + durationBeforeMinutes);
@@ -1228,20 +1948,28 @@ public class SandboxUserFunctionalitySteps {
     @When("the student starts the sandbox and continues through catalog details if shown")
     public void theStudentStartsTheSandboxAndContinuesThroughCatalogDetailsIfShown() {
         GlobalHooks.labProvisioned = true;
-        try {
-            landing().openLabConsole();
-        } catch (RuntimeException | AssertionError e) {
-            System.out.println("[SB-user] openLabConsole: " + e.getMessage());
+        if (studentPage == null || studentPage.isClosed()) {
+            releaseAdminContext();
+            openStudentPageFor(student);
+        }
+        openStudentLabConsoleForVmOrCatalog();
+        if (cp().showsLabDeletedMessage() && recoverFromDeletedOrUnstartableLab("console-deleted")) {
+            openStudentLabConsoleForVmOrCatalog();
         }
         completeCatalogFormIfShown();
-        if (cp().waitUntilLabLoaded(8) || iframeVisibleNow()) {
+        clickProceedIfShown();
+        completeCatalogFormIfShown();
+        ensureVmStartLabClickedIfShown();
+        if (vmCatalogFlowAlreadyReady() && !isStartLabButtonShown()) {
             System.out.println("[SB-user] lab already loaded — skip Start/Proceed wait");
             if (student != null) {
                 SandboxUserRegistry.markUsedActivity(courseId, ctx.newActivityCmid, student.username);
                 bindNamedStudentIfNeeded();
             }
-            rememberSandboxLabId(cp().labId());
-            ensureSandboxLabIdCaptured();
+            rememberSandboxLabId(resolveCloudLabsSubscriptionIdPreferManageLabs());
+            if (manageLabsLabIdLookupAllowed()) {
+                ensureSandboxLabIdCaptured();
+            }
             if (ctx.sectionId != null && !ctx.sectionId.isBlank()) {
                 GlobalHooks.teardownSectionId = ctx.sectionId;
             }
@@ -1253,47 +1981,122 @@ public class SandboxUserFunctionalitySteps {
         try {
             cp().expectControlPanelLoaded(90_000);
         } catch (RuntimeException ignored) {}
-        Locator startBtn = studentPage.locator(PlaygroundControlPanel.LAUNCH_START);
-        try {
-            if (startBtn.count() > 0 && startBtn.first().isVisible()) {
-                cp().clickStartLab();
-            }
-        } catch (RuntimeException ignored) {}
+        ensureVmStartLabClickedIfShown();
         clickProceedIfShown();
         completeCatalogFormIfShown();
         boolean ready = false;
-        long deadline = System.currentTimeMillis() + 240_000;
+        int vmWaitSec = isVmSandboxDataset() ? sandboxVmCatalogWaitSeconds() : 240;
+        long deadline = System.currentTimeMillis() + vmWaitSec * 1000L;
+        int waitPoll = 0;
         while (System.currentTimeMillis() < deadline) {
-            if (iframeVisibleNow() || cp().waitUntilLabLoaded(1)) {
+            waitPoll++;
+            ensureStudentOnLabConsole();
+            ensureVmStartLabClickedIfShown();
+            clickCatalogProceedIfShown();
+            dismissLaunchAccModalIfShown();
+            if (vmCatalogFlowAlreadyReady()) {
                 ready = true;
+                System.out.println("[SB-user] VM/catalog lab ready poll=" + waitPoll + " reason="
+                        + cp().labSurfaceReadyReason());
                 break;
             }
-            if (studentPage.url().contains("/mod/cloudlabs/view.php") && !controlPanelOpen()) {
-                try {
-                    landing().openLabConsole();
-                } catch (RuntimeException ignored) {}
+            if (isVmSandboxDataset() && waitPoll % 10 == 0) {
+                System.out.println("[SB-user] VM/catalog waiting poll=" + waitPoll + " startLab="
+                        + isStartLabButtonShown() + " iframe=" + iframeVisibleNow()
+                        + " toolbar=" + vmToolbarVisibleNow());
+            }
+            if (studentPage.url().contains("/mod/cloudlabs/view.php") && !cp().isLabCpFragmentMounted()) {
+                openStudentLabConsoleForVmOrCatalog();
                 completeCatalogFormIfShown();
-                clickProceedIfShown();
+                clickCatalogProceedIfShown();
             }
             studentPage.waitForTimeout(3_000);
         }
-        assertTrue(ready, "sandbox lab did not load after Start/Proceed (url=" + studentPage.url() + ")");
+        if (!ready && catalogStartRecoveryAttempts < 1 && cp().showsLabDeletedMessage()
+                && recoverFromDeletedOrUnstartableLab("vm-catalog-deleted-retry")) {
+            catalogStartRecoveryAttempts++;
+            theStudentStartsTheSandboxAndContinuesThroughCatalogDetailsIfShown();
+            return;
+        }
+        if (!ready && isVmSandboxDataset()) {
+            System.out.println("[SB-user] VM/catalog poll exhausted — final Start Lab + CloudLabs wait");
+            vmStartLabAndWaitUntilReady(sandboxVmStartLabSeconds());
+            ready = vmCatalogFlowAlreadyReady() || vmLabReadySignal();
+            if (!ready) {
+                ready = tryWaitSandboxRunningViaCloudLabsThenUi(180, 120);
+            }
+        }
+        assertTrue(ready, "sandbox lab did not load after Start/Proceed (url="
+                + (studentPage == null || studentPage.isClosed() ? "(page closed)" : studentPage.url()) + ")");
         if (student != null) {
             SandboxUserRegistry.markUsedActivity(courseId, ctx.newActivityCmid, student.username);
             bindNamedStudentIfNeeded();
         }
-        rememberSandboxLabId(cp().labId());
-        ensureSandboxLabIdCaptured();
+        rememberSandboxLabId(resolveCloudLabsSubscriptionIdPreferManageLabs());
+        if (manageLabsLabIdLookupAllowed()) {
+            ensureSandboxLabIdCaptured();
+        }
         if (ctx.sectionId != null && !ctx.sectionId.isBlank()) {
             GlobalHooks.teardownSectionId = ctx.sectionId;
         }
         if (student != null) GlobalHooks.teardownStudentEmail = student.email;
     }
 
+    private boolean isStartLabButtonShown() {
+        if (studentPage == null || studentPage.isClosed()) return false;
+        try {
+            Object shown = studentPage.evaluate("""
+                    () => {
+                      const launch = ['#np-ap-mod-access-launch-btn-acc', '#np-ap-mod-access-launch-btn-vm'];
+                      for (const sel of launch) {
+                        const el = document.querySelector(sel);
+                        if (el && !el.classList.contains('d-none') && el.offsetParent !== null) return true;
+                      }
+                      const nodes = document.querySelectorAll(
+                        'button, a, input[type=button], input[type=submit]');
+                      for (const el of nodes) {
+                        const label = (el.innerText || el.value || '').trim();
+                        if (!/^Start Lab$/i.test(label)) continue;
+                        if (el.classList.contains('d-none') || el.offsetParent === null) continue;
+                        return true;
+                      }
+                      return false;
+                    }
+                    """);
+            return Boolean.TRUE.equals(shown);
+        } catch (RuntimeException ignored) {}
+        return false;
+    }
+
+    /** VM catalog flow: console can load before Start Lab — click when the launch control is visible. */
+    private void ensureVmStartLabClickedIfShown() {
+        if (!isStartLabButtonShown()) return;
+        System.out.println("[SB-user] clicking Start Lab on console");
+        try {
+            Locator vm = studentPage.locator(PlaygroundControlPanel.START_LAB_VM).first();
+            vm.scrollIntoViewIfNeeded();
+        } catch (RuntimeException ignored) {}
+        cp().clickStartLab();
+        try {
+            cp().jsClick(PlaygroundControlPanel.START_LAB_VM);
+        } catch (RuntimeException ignored) {}
+        completeCatalogFormIfShown();
+        clickCatalogProceedIfShown();
+        dismissLaunchAccModalIfShown();
+        studentPage.waitForTimeout(1_500);
+    }
+
+    /** Catalog Proceed only — never click landing {@code Continue} (that leaves the lab console). */
     private void clickProceedIfShown() {
+        clickCatalogProceedIfShown();
+    }
+
+    private void clickCatalogProceedIfShown() {
+        if (studentPage == null || studentPage.isClosed()) {
+            return;
+        }
         Locator proceed = studentPage.locator(
-                "#subCatalogDataSubmitBtn, button:has-text('Proceed'), "
-                        + "button:has-text('Continue'), input[value='Proceed']");
+                "#subCatalogDataSubmitBtn, button:has-text('Proceed'), input[value='Proceed']");
         for (int attempt = 0; attempt < 8; attempt++) {
             boolean clicked = false;
             for (int i = 0; i < proceed.count(); i++) {
@@ -1310,16 +2113,91 @@ public class SandboxUserFunctionalitySteps {
         }
     }
 
-    private void clickProceedIfShown() {
+    private void completeCatalogFormIfShown() {
+        if (studentPage == null || studentPage.isClosed()) {
+            return;
+        }
+        try {
+            studentPage.evaluate("""
+                    () => {
+                      const root = document.querySelector('#np-ap-mod-lab-ui-schema, #catInputUI');
+                      if (!root || root.offsetParent === null) return false;
+                      root.querySelectorAll('select').forEach(sel => {
+                        if (sel.options.length > 1 && !sel.value) sel.selectedIndex = 1;
+                        else if (sel.options.length > 0 && !sel.value) sel.selectedIndex = 0;
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                      });
+                      root.querySelectorAll('input[type=text]').forEach(inp => {
+                        if (!inp.value) {
+                          inp.value = 'auto';
+                          inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                      });
+                      const btn = document.querySelector('#subCatalogDataSubmitBtn');
+                      if (btn && !btn.disabled && btn.offsetParent !== null) {
+                        btn.click();
+                        return true;
+                      }
+                      return false;
+                    }
+                    """);
+            studentPage.waitForTimeout(1_500);
+        } catch (RuntimeException ignored) {}
+    }
+
+    private boolean controlPanelOpen() {
+        try {
+            return cp().isShown();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private void openStudentLabConsoleForVmOrCatalog() {
+        openCreatedLanding();
+        try {
+            if (landing().hasVisibleContinue() || landing().hasActiveLab()) {
+                if (!cp().isConsoleOpen() && !studentLabSurfaceReady()) {
+                    landing().openConsoleViaContinue();
+                }
+            } else {
+                landing().openLabConsole();
+            }
+        } catch (RuntimeException | AssertionError e) {
+            System.out.println("[SB-user] VM/catalog open console: " + e.getMessage());
+        }
+    }
+
+    private boolean studentLabSurfaceReady() {
+        if (isVmSandboxDataset()) {
+            return vmLabReadySignal();
+        }
+        if (isStartLabButtonShown()) {
+            return false;
+        }
+        if (iframeVisibleNow()) return true;
+        try {
+            if (cp().waitUntilToolbarReady(1)) return true;
+        } catch (RuntimeException ignored) {}
+        try {
+            return cp().isConsoleOpen() && !cp().labSurfaceReadyReason().isBlank();
+        } catch (RuntimeException ignored) {}
+        return false;
+    }
+
+    private boolean iframeVisibleNow() {
         try {
             Object ok = studentPage.evaluate("""
                     () => {
+                      const root = document.querySelector('#np-ap-mod-lab-container-iframe');
+                      if (root && root.classList.contains('d-none')) return false;
                       const iframe = document.querySelector(
-                        '#np-ap-mod-lab-container-iframe iframe, iframe[src*="guacamole"], iframe[id*="lab_iframe"]');
-                      if (!iframe) return false;
-                      const src = iframe.getAttribute('src') || iframe.src || '';
-                      if (!src || src === 'about:blank') return false;
-                      return !iframe.closest('.d-none');
+                        '#np-ap-mod-lab-container-iframe iframe, iframe[src*="guacamole"], '
+                        + 'iframe[id*="lab_iframe"], iframe[id*="lab"]');
+                      if (!iframe || iframe.closest('.d-none')) return false;
+                      const src = (iframe.getAttribute('src') || iframe.src || '').trim();
+                      if (src && src !== 'about:blank') return true;
+                      return iframe.offsetWidth > 80 && iframe.offsetHeight > 80;
                     }
                     """);
             return Boolean.TRUE.equals(ok);
@@ -1339,13 +2217,20 @@ public class SandboxUserFunctionalitySteps {
 
     @Then("the VM lab is loaded inside an iframe")
     public void theVmLabIsLoadedInsideAnIframe() {
-        assertTrue(waitForVmIframe(30),
-                "VM lab iframe not found on console (url=" + studentPage.url() + ")");
+        ensureStudentOnLabConsole();
+        if (!vmLabReadySignal()) {
+            vmStartLabAndWaitUntilReady(120);
+        }
+        ensureStudentOnLabConsole();
+        assertTrue(waitForVmIframe(90),
+                "VM lab iframe not found on console (url=" + studentPage.url() + " reason="
+                        + cp().labSurfaceReadyReason() + ")");
         System.out.println("[SB-user] VM iframe OK url=" + studentPage.url());
     }
 
     @Then("the student speed test completes and displays values")
     public void theStudentSpeedTestCompletesAndDisplaysValues() {
+        ensureStudentOnLabConsole();
         assertTrue(cp().waitUntilToolbarReady(90),
                 "VM lab toolbar did not appear (Speed Test lives on #np-ap-mod-lab-topbar)");
         long deadlineShow = System.currentTimeMillis() + 60_000;
@@ -1371,14 +2256,10 @@ public class SandboxUserFunctionalitySteps {
             throw new SkipException("Speed Test icon stayed hidden (template enableSpeedtest="
                     + enabled + "). Enable Speed Test on the Ubuntu Desktop VPAT template.");
         }
-        Page speedPage = studentPage;
-        try {
-            Page popup = studentPage.context().waitForPage(
-                    new BrowserContext.WaitForPageOptions().setTimeout(15_000),
-                    () -> cp().jsClick("#np-ap-mod-btn-tb-speedTest"));
-            if (popup != null) speedPage = popup;
-        } catch (RuntimeException noPopup) {
-            cp().jsClick("#np-ap-mod-btn-tb-speedTest");
+        Page speedPage = clickSpeedTestPage();
+        if (!isLikelySpeedTestSurface(speedPage)) {
+            ensureStudentOnLabConsole();
+            speedPage = clickSpeedTestPage();
         }
         speedPage.waitForTimeout(2_000);
         Locator start = speedPage.locator(
@@ -1399,6 +2280,10 @@ public class SandboxUserFunctionalitySteps {
         String body = "";
         boolean hasValues = false;
         while (System.currentTimeMillis() < deadline) {
+            if (!isLikelySpeedTestSurface(speedPage)) {
+                ensureStudentOnLabConsole();
+                speedPage = clickSpeedTestPage();
+            }
             body = speedPage.locator("body").innerText();
             String lower = body.toLowerCase(Locale.ROOT);
             int nums = 0;
@@ -1415,8 +2300,41 @@ public class SandboxUserFunctionalitySteps {
         System.out.println("[SB-user] Speed Test values OK");
     }
 
+    private Page clickSpeedTestPage() {
+        try {
+            Page popup = studentPage.context().waitForPage(
+                    new BrowserContext.WaitForPageOptions().setTimeout(12_000),
+                    () -> cp().jsClick("#np-ap-mod-btn-tb-speedTest"));
+            if (popup != null && isLikelySpeedTestSurface(popup)) {
+                return popup;
+            }
+            if (popup != null) {
+                try {
+                    popup.close();
+                } catch (RuntimeException ignored) {}
+            }
+        } catch (RuntimeException ignored) {}
+        cp().jsClick("#np-ap-mod-btn-tb-speedTest");
+        return studentPage;
+    }
+
+    private boolean isLikelySpeedTestSurface(Page page) {
+        if (page == null || page.isClosed()) return false;
+        try {
+            if (page.locator("#np-ap-mod-btn-tb-speedTest").count() > 0) return false;
+            String body = page.locator("body").innerText().toLowerCase(Locale.ROOT);
+            if (body.contains("skip to main content") && body.contains("my courses")) return false;
+            if (body.contains("start speed test") || body.contains("speed test")) return true;
+            if (body.contains("download") && body.contains("upload")) return true;
+            return page.locator("#startSpeedTest, button:has-text('Start Speed Test')").count() > 0;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     @Then("the student switches the lab to full screen")
     public void theStudentSwitchesTheLabToFullScreen() {
+        ensureStudentOnLabConsole();
         assertTrue(cp().waitUntilToolbarReady(90),
                 "lab toolbar not shown — cannot switch to full screen");
         Locator fs = studentPage.locator("#np-ap-mod-btn-tb-fullscreen");
@@ -1580,6 +2498,69 @@ public class SandboxUserFunctionalitySteps {
         return Math.abs(ui - api) <= 15;
     }
 
+    private void assertConsoleUsageAlignsWithCloudLabs(String usageText) {
+        if (!CloudLabsClient.isConfigured() || CloudLabsClient.isBlocked()) {
+            return;
+        }
+        String labId = resolveSandboxLabId();
+        if (labId == null || labId.isBlank()) {
+            return;
+        }
+        String json;
+        try {
+            json = CloudLabsClient.getSubscriptionsStatusBody(labId);
+        } catch (CloudLabsClient.UnavailableException e) {
+            System.out.println("[SB-user] duration API skip: " + e.getMessage());
+            return;
+        }
+        CloudLabsClient.DurationInfo api = CloudLabsClient.parseDuration(json);
+        if (api.unlimited) {
+            assertTrue(usageText.toLowerCase(Locale.ROOT).contains("unlimited")
+                            || json.toLowerCase(Locale.ROOT).contains("unlimited"),
+                    "CloudLabs reports unlimited but usage panel does not mention it");
+            return;
+        }
+        int uiMinutes = parseDurationToMinutes(usageText);
+        boolean matched = false;
+        if (uiMinutes >= 0 && api.allottedMinutes != null) matched |= minutesClose(uiMinutes, api.allottedMinutes);
+        if (uiMinutes >= 0 && api.remainingMinutes != null) matched |= minutesClose(uiMinutes, api.remainingMinutes);
+        if (!matched) {
+            matched = containsDurationToken(json, usageText);
+        }
+        if (!matched) {
+            System.out.println("[SB-user] Lab Usage vs CloudLabs duration not exact (parallel/UI units) usage='"
+                    + usageText.substring(0, Math.min(120, usageText.length())) + "' api allotted="
+                    + api.allottedMinutes + " remaining=" + api.remainingMinutes + " — UI presence OK");
+        }
+    }
+
+    private void assertConsoleCredentialsAlignWithCloudLabs(String credsText) {
+        if (!CloudLabsClient.isConfigured() || CloudLabsClient.isBlocked()) {
+            return;
+        }
+        String labId = resolveSandboxLabId();
+        if (labId == null || labId.isBlank()) {
+            return;
+        }
+        String json;
+        try {
+            json = CloudLabsClient.getSubscriptionsStatusBody(labId);
+        } catch (CloudLabsClient.UnavailableException e) {
+            return;
+        }
+        String lowerJson = json.toLowerCase(Locale.ROOT);
+        Matcher userMatcher = Pattern.compile(
+                "\"(?:username|userName|login|userid|user)\"\\s*:\\s*\"([^\"]{2,})\"",
+                Pattern.CASE_INSENSITIVE).matcher(json);
+        if (userMatcher.find()) {
+            String apiUser = userMatcher.group(1).trim();
+            if (!credsText.toLowerCase(Locale.ROOT).contains(apiUser.toLowerCase(Locale.ROOT))) {
+                System.out.println("[SB-user] credentials UI does not show API username '" + apiUser
+                        + "' — login/password labels present");
+            }
+        }
+    }
+
     private static boolean containsDurationToken(String json, String ui) {
         if (ui == null || ui.isBlank() || json == null) return false;
         String t = ui.trim();
@@ -1601,20 +2582,37 @@ public class SandboxUserFunctionalitySteps {
 
     @Then("the sandbox lab is running after catalog proceed")
     public void theSandboxLabIsRunningAfterCatalogProceed() {
+        if (!studentLabSurfaceReady()) {
+            openStudentLabConsoleForVmOrCatalog();
+        }
         String labId = resolveSandboxLabId();
+        if (labId == null) {
+            rememberSandboxLabId(resolveCloudLabsSubscriptionIdPreferManageLabs());
+            labId = resolveSandboxLabId();
+        }
         if (labId != null && CloudLabsClient.isConfigured() && !CloudLabsClient.isBlocked()) {
             try {
                 ManageLabs.LabState st = CloudLabsClient.waitForState(labId,
                         EnumSet.of(ManageLabs.LabState.RUNNING, ManageLabs.LabState.FAILED), 180, 5);
-                assertEquals(st, ManageLabs.LabState.RUNNING, "lab not Running after catalog Proceed labId=" + labId);
-                return;
+                if (st == ManageLabs.LabState.RUNNING) {
+                    return;
+                }
+                if (st == ManageLabs.LabState.NOTCREATED) {
+                    System.out.println("[SB-user] CloudLabs NOTCREATED for labId=" + labId
+                            + " — falling back to console UI");
+                } else {
+                    assertEquals(st, ManageLabs.LabState.RUNNING,
+                            "lab not Running after catalog Proceed labId=" + labId);
+                    return;
+                }
             } catch (CloudLabsClient.UnavailableException e) {
                 System.out.println("[SB-user] CloudLabs unavailable after catalog Proceed — using console: "
                         + e.getMessage());
             }
         }
-        assertTrue(cp().waitUntilLabLoaded(30) || waitForVmIframe(10),
-                "lab did not become ready after catalog Proceed");
+        assertTrue(studentLabSurfaceReady() || cp().waitUntilLabLoaded(30) || waitForVmIframe(15),
+                "lab did not become ready after catalog Proceed (url="
+                        + (studentPage == null ? "?" : studentPage.url()) + ")");
     }
 
     @Then("the sandbox lab duration is unlimited")

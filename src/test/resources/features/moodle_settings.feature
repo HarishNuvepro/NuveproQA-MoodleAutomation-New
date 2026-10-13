@@ -450,12 +450,9 @@ Feature: Moodle settings
     When I set the "id_s_moodlecourse_numsections" field to "6" and save
     Then the add-new-course form in category "1" shows "6" for the "id_numsections" field
 
-  # FINDING: the manual (SET-22) expects a course duration of 0 to be rejected / coerced to 365, but
-  # this site's Course default settings ACCEPTS and stores 0 (a 0-day default would give new courses an
-  # end date equal to their start date). Asserting the ACTUAL behaviour and flagging the discrepancy;
-  # the @After restores the duration to its original value.
+  # Manual sheet once expected 0 → 365; this site persists 0. Scenario asserts live behaviour; @After restores.
   @SET-22 @settings @coursedep
-  Scenario: A course duration of zero is accepted by the setting (manual expected rejection)
+  Scenario: A course duration of zero is accepted by the course default setting
     Given I open the "coursesettings" settings page
     When I set the "id_s_moodlecourse_coursedurationv" field to "0" and save
     Then the "id_s_moodlecourse_coursedurationv" field is "0"

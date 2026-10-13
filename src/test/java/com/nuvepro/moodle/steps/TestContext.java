@@ -7,9 +7,11 @@ import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.Tracing;
 import com.nuvepro.moodle.config.Settings;
+import com.nuvepro.moodle.helpers.AssessmentSuiteCourse;
+import com.nuvepro.moodle.helpers.AutomationCourses;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.PlaygroundControlPanel;
 import com.nuvepro.moodle.pages.PlaygroundLanding;
-
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.List;
@@ -24,7 +26,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * saved storageState, so the scenario is already logged in (no re-login).
  */
 public class TestContext {
-    private static final int PARALLEL_BROWSER_LIMIT = 5;
+    private static final int PARALLEL_BROWSER_LIMIT = Integer.getInteger("parallel.browsers", 5);
     private static final Semaphore BROWSER_PERMITS = new Semaphore(PARALLEL_BROWSER_LIMIT, true);
 
     public Playwright ownedPlaywright;
@@ -46,10 +48,27 @@ public class TestContext {
     public String labStatus = "";
     public Page openedTab;
     public BrowserContext studentContext;
+    /** Set by {@code FreshLabSteps} for cross-step provisioning flows (e.g. My Labs). */
+    public com.nuvepro.moodle.helpers.ApiClient.SeededUser seededUser;
+    public String freshLabSubscriptionId;
     public Page studentPage;
     public String bulkAction;
     public String scenarioName;
     public Set<String> scenarioTags = new HashSet<>();
+
+    /** {@code CloudLabsConfigSteps} — per-scenario (step defs are a singleton under parallel Cucumber). */
+    public int dlcSavedChallengeCmid = -1;
+    public String dlcSavedChallengeDifficulty = "";
+    public String cloudlabsDifficultyBaseline;
+
+    /** Throwaway assessment suite course or {@code COURSE_ID} from .env (see {@link AutomationCourses}). */
+    public String assessmentCourseId() {
+        return AutomationCourses.assessmentCourseId(page);
+    }
+
+    public boolean assessmentCourseMissing() {
+        return Settings.COURSE_ID.isBlank() && AssessmentSuiteCourse.idOrEmpty().isBlank();
+    }
 
     // failure-diagnostics: browser console/page-errors collected during the scenario, and whether a
     // Playwright trace is currently recording (FailureCapture saves it on failure, discards on pass).
@@ -63,8 +82,7 @@ public class TestContext {
             browserPermitHeld = true;
             try {
                 ownedPlaywright = Playwright.create();
-                browser = ownedPlaywright.chromium().launch(new BrowserType.LaunchOptions()
-                        .setHeadless(Settings.HEADLESS).setSlowMo(Settings.SLOWMO_MS));
+                browser = ownedPlaywright.chromium().launch(BrowserUi.defaultLaunchOptions());
                 ownsBrowser = true;
             } catch (Throwable t) {
                 releaseBrowserPermits(1);
@@ -76,12 +94,18 @@ public class TestContext {
         }
         Browser.NewContextOptions opts = new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL)
-                .setIgnoreHTTPSErrors(true);
-        if (java.nio.file.Files.exists(GlobalHooks.STORAGE_STATE)) {
+                .setIgnoreHTTPSErrors(true)
+                .setAcceptDownloads(true);
+        GlobalHooks.seedParallelStorageStateIfAbsent();
+        Path statePath = GlobalHooks.adminStorageStatePath();
+        if (java.nio.file.Files.exists(statePath)) {
+            opts.setStorageStatePath(statePath);
+        } else if (java.nio.file.Files.exists(GlobalHooks.STORAGE_STATE)) {
             opts.setStorageStatePath(GlobalHooks.STORAGE_STATE);
         }
-        context = browser.newContext(opts);
+        context = BrowserUi.newContext(browser, opts);
         page = context.newPage();
+        BrowserUi.preparePage(page);
         page.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
         GlobalHooks.ensureAdminSession(context, page);
         beginTracing(context);
@@ -202,7 +226,13 @@ public class TestContext {
     private String laneHeld;
 
     public void enterLane(String key) {
-        if (key == null || key.isBlank() || !Boolean.getBoolean("sandbox.parallel")) return;
+        enterLane(key, false);
+    }
+
+    /** {@link #enterLane(String)} is parallel-only; {@code forceSerial} also serializes single-thread runs. */
+    public void enterLane(String key, boolean forceSerial) {
+        if (key == null || key.isBlank()) return;
+        if (!forceSerial && !Boolean.getBoolean("sandbox.parallel")) return;
         if (laneHeld != null) return;   // one lane per scenario; first claim wins
         LANES.computeIfAbsent(key, k -> new ReentrantLock(true)).lock();
         laneHeld = key;

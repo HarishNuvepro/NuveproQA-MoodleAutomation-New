@@ -1,0 +1,36 @@
+---
+description: After Kiwi workbook, coverage, or BDD tag changes — refresh dashboards and traceability without being asked
+alwaysApply: true
+---
+
+# Kiwi dashboard + traceability sync (mandatory)
+
+Whenever you change anything that affects manual-case coverage, execution status, or traceability, **finish the same task** by running:
+
+```bash
+python tools/sync_kiwi_and_traceability.py
+```
+
+Do this **proactively** — the user should not have to request it.
+
+## Triggers (non-exhaustive)
+
+- Edited or saved `docs/MoodleRegression_Testing_Kiwi new.xlsx` (including via `tools/update_*_coverage.py`, openpyxl, or gap-fill scripts)
+- Changed `Automated`, `Automation_Ref`, `Case_Status`, CGAP rows, or module coverage scripts under `tools/`
+- Added/renamed/retagged Cucumber scenarios (`@LT-*`, `@CGAP-*`, `@PG-*`, etc.) or feature files
+- Marked cases Yes/No/Partial/Deviation/Deferred in the workbook or coverage tooling
+- Completed a meaningful test run that should refresh last-result columns in traceability (uses `target/cucumber.json` and optional `cucumber_fast.json` / `cucumber_slow.json`)
+
+## Order when writing the workbook
+
+1. Apply per-case rows on the module sheet (and run the module’s `update_*_coverage.py` when that module uses one).
+2. **`python tools/refresh_kiwi_dashboard.py`** is included inside sync — still run **`python tools/sync_kiwi_and_traceability.py`** once at the end.
+
+## Outputs to keep current
+
+- Kiwi: `Regression_Dashboard`, `Release_Regression_Plan`, `Automation_Coverage` (formula caches)
+- `reports/traceability_execution.csv`, `reports/traceability_execution.html`, `reports/traceability_audit_summary.md`
+
+## Drift
+
+If `check_kiwi_dashboards.py` reports DRIFT, note it in the handoff to the user; do not rewrite QA-owned dashboard layout without approval. Use `--strict` only when CI or the user requires exit code 1 on drift.

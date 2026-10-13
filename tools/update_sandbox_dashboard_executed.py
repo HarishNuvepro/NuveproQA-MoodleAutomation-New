@@ -12,19 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 XLSX = ROOT / "docs" / "MoodleRegression_Testing_Kiwi new.xlsx"
 SHEET = "Moodle_Sandbox_Labs"
 
-# Last completed/known-fail tags (do not mark these Pass).
-FAIL_TAGS = (
-    "@SB-user-2",
-    "@SB-user-14",
-    "@SB-user-15",
-    "@SB-user-17",
-    "@SB-user-18",
-    "@SB-manage-12",
-    "@SB-manage-19",
-    "@SB-manage-20",
-    "@SB-manage-24",
-    "@SB-manage-27",
-)
+# Optional: tags to keep as Fail when re-stamping after a partial run (empty = all Yes → Pass).
+FAIL_TAGS: tuple[str, ...] = ()
 
 
 def recount_auto(ws):

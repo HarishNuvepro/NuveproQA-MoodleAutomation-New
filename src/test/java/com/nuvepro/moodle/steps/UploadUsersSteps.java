@@ -6,7 +6,9 @@ import com.microsoft.playwright.Page;
 import com.nuvepro.moodle.config.Settings;
 import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.helpers.Auth;
+import com.nuvepro.moodle.helpers.CrossProcessLock;
 import com.nuvepro.moodle.helpers.UploadUsersCsv;
+import com.nuvepro.moodle.helpers.BrowserUi;
 import com.nuvepro.moodle.pages.AdminUsers;
 import com.nuvepro.moodle.pages.CourseAdmin;
 import com.nuvepro.moodle.pages.Groups;
@@ -27,6 +29,8 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -38,6 +42,15 @@ import static org.testng.Assert.assertTrue;
 public final class UploadUsersSteps {
     private static final String STRONG_PASSWORD = "Upload#2026Aa1!";
     private static final int MANAGER_ROLE_ID = 1;
+    /** One upload wizard at a time in parallel — draft file must stay stable through commit. */
+    private static final ReentrantLock UPLOAD_WIZARD = new ReentrantLock(true);
+    /** Serializes Upload users across separate Maven terminals (not just in-JVM threads). */
+    private static final CrossProcessLock UPLOAD_WIZARD_CROSS = CrossProcessLock.named("upload-user-wizard");
+    private static final ThreadLocal<Integer> UPLOAD_WIZARD_DEPTH = ThreadLocal.withInitial(() -> 0);
+    /** Last CSV attached in {@link #preview(Path)} — used to re-open preview after temp-file / navigation loss. */
+    private static final ThreadLocal<Path> LAST_PREVIEW_CSV = new ThreadLocal<>();
+    /** Re-applied after preview recovery (upload type, force-password-change, etc.). */
+    private static final ThreadLocal<Runnable> PREVIEW_OPTIONS_BEFORE_COMMIT = new ThreadLocal<>();
     private final TestContext ctx;
     private final UploadUsersPage upload;
     private final AdminUsers admin;
@@ -100,6 +113,156 @@ public final class UploadUsersSteps {
         return user;
     }
 
+    private void beginUploadWizard() {
+        if (!Boolean.getBoolean("sandbox.parallel")) return;
+        if (UPLOAD_WIZARD_DEPTH.get() == 0) {
+            UPLOAD_WIZARD.lock();
+            UPLOAD_WIZARD_CROSS.lock(45, TimeUnit.MINUTES);
+        }
+        UPLOAD_WIZARD_DEPTH.set(UPLOAD_WIZARD_DEPTH.get() + 1);
+    }
+
+    private void endUploadWizard() {
+        if (!Boolean.getBoolean("sandbox.parallel")) return;
+        int depth = UPLOAD_WIZARD_DEPTH.get();
+        if (depth <= 0) return;
+        depth--;
+        UPLOAD_WIZARD_DEPTH.set(depth);
+        if (depth == 0) {
+            UPLOAD_WIZARD_CROSS.unlock();
+            UPLOAD_WIZARD.unlock();
+        }
+    }
+
+    private void runUploadWizard(Runnable action) {
+        beginUploadWizard();
+        try {
+            action.run();
+        } finally {
+            endUploadWizard();
+        }
+    }
+
+    private void reopenPreviewFromLastCsv() {
+        Path csv = LAST_PREVIEW_CSV.get();
+        if (csv == null || !Files.isRegularFile(csv)) {
+            return;
+        }
+        System.out.println("[UploadUsers] re-opening preview from " + csv.getFileName());
+        upload.open();
+        upload.dismissBlockingDialogue();
+        upload.chooseCsv(csv);
+        upload.waitForDraftFileReady();
+        upload.submitInitial();
+        if (!upload.previewVisible()) {
+            throw new AssertionError("Upload users preview did not re-open: " + ctx.page.url());
+        }
+        Runnable opts = PREVIEW_OPTIONS_BEFORE_COMMIT.get();
+        if (opts != null) {
+            opts.run();
+        }
+    }
+
+    private void recoverUploadWizardBeforeRetry() {
+        upload.dismissBlockingDialogue();
+        ctx.page.waitForTimeout(1_500);
+        if (upload.previewVisible()) {
+            upload.waitForDraftFileReady();
+            return;
+        }
+        if (!upload.resultVisible()) {
+            reopenPreviewFromLastCsv();
+        }
+    }
+
+    private void commitUploadWithRetry() {
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            try {
+                if (upload.previewVisible()) {
+                    upload.ensurePreviewReadyForCommit();
+                } else if (!upload.resultVisible()) {
+                    recoverUploadWizardBeforeRetry();
+                }
+                upload.commit();
+            } catch (RuntimeException commitFailed) {
+                String msg = commitFailed.getMessage() == null ? "" : commitFailed.getMessage();
+                System.out.println("[UploadUsers] commit attempt " + attempt + " failed url=" + ctx.page.url()
+                        + " — " + msg);
+                if (attempt < 4 && (msg.contains("Timeout") || msg.contains("not visible")
+                        || msg.contains("not ready to commit") || msg.contains("temporary file"))) {
+                    recoverUploadWizardBeforeRetry();
+                    continue;
+                }
+                throw commitFailed;
+            }
+            if (upload.resultVisible() && !upload.serverTempFileError()) {
+                return;
+            }
+            System.out.println("[UploadUsers] commit attempt " + attempt + " url=" + ctx.page.url()
+                    + " tempError=" + upload.serverTempFileError());
+            if (attempt < 4 && (upload.serverTempFileError() || !upload.previewVisible())) {
+                recoverUploadWizardBeforeRetry();
+                continue;
+            }
+        }
+        if (upload.serverTempFileError()) {
+            throw new AssertionError("Upload users temp-file error on commit: " + upload.resultText());
+        }
+        assertTrue(upload.resultVisible(),
+                "Upload users commit did not reach results: " + ctx.page.url());
+    }
+
+    /** Commit (with temp-file retries), capture summary, release upload wizard lock. */
+    private void commitUploadAndCapture(String what) {
+        try {
+            commitUploadWithRetry();
+            captureResults(what);
+        } finally {
+            PREVIEW_OPTIONS_BEFORE_COMMIT.remove();
+            endUploadWizard();
+        }
+    }
+
+    private void commitUpload() {
+        try {
+            commitUploadWithRetry();
+        } finally {
+            endUploadWizard();
+        }
+    }
+
+    private void releaseUploadWizardLock() {
+        while (UPLOAD_WIZARD_DEPTH.get() > 0) endUploadWizard();
+    }
+
+    /**
+     * Commit, read results, and click Continue without releasing the upload wizard lock (preview
+     * already holds it). Parallel runs must not open Upload users until Continue finishes.
+     */
+    private void commitCaptureContinue(String what) {
+        RuntimeException last = null;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            try {
+                lastResults = upload.commitCaptureAndContinue().replaceAll("\\s+", " ").trim();
+                String url = ctx.page.url().toLowerCase(Locale.ROOT);
+                assertTrue(url.contains("user_bulk") || upload.initialFormVisible()
+                                || upload.resultVisible() || lastResults.contains("Users created"),
+                        what + " did not reach Upload users results: " + lastResults);
+                System.out.println("[UploadUsers] " + what + " -> " + lastResults);
+                return;
+            } catch (RuntimeException e) {
+                last = e;
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (attempt < 3 && msg.contains("Execution context was destroyed")) {
+                    ctx.page.waitForTimeout(1_500);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (last != null) throw last;
+    }
+
     private Path basicCsv(String name, CsvUser... records) {
         List<List<String>> rows = new ArrayList<>();
         for (CsvUser u : records) {
@@ -110,10 +273,42 @@ public final class UploadUsersSteps {
     }
 
     private void preview(Path csv) {
-        upload.open();
-        upload.chooseCsv(csv);
-        upload.submitInitial();
-        assertTrue(upload.previewVisible(), "Upload users preview did not open: " + ctx.page.url());
+        assertTrue(Files.isRegularFile(csv),
+                "CSV fixture missing before preview: " + csv);
+        LAST_PREVIEW_CSV.set(csv);
+        beginUploadWizard();
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= 6; attempt++) {
+            try {
+                upload.open();
+                upload.dismissBlockingDialogue();
+                upload.chooseCsv(csv);
+                upload.waitForDraftFileReady();
+                upload.submitInitial();
+                if (upload.previewVisible()) return;
+                if (upload.serverTempFileError() && attempt < 6) {
+                    System.out.println("[UploadUsers] preview attempt " + attempt
+                            + " did not open preview — retrying");
+                    ctx.page.waitForTimeout(2_500);
+                    continue;
+                }
+            } catch (RuntimeException e) {
+                last = e;
+                if (attempt < 6) {
+                    ctx.page.waitForTimeout(2_500);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (last != null) {
+            endUploadWizard();
+            throw last;
+        }
+        if (!upload.previewVisible()) {
+            endUploadWizard();
+            assertTrue(false, "Upload users preview did not open: " + ctx.page.url());
+        }
     }
 
     /**
@@ -131,25 +326,51 @@ public final class UploadUsersSteps {
     }
 
     private void configureNewOnlyAndCommit() {
-        upload.setUploadType("Add new only");
-        upload.setNewUserPassword("Field required");
-        upload.commit();
-        captureResults("Add new only upload");
+        Runnable config = () -> {
+            upload.setUploadType("Add new only");
+            upload.setNewUserPassword("Field required");
+        };
+        config.run();
+        PREVIEW_OPTIONS_BEFORE_COMMIT.set(config);
+        commitUploadAndCapture("Add new only upload");
     }
 
     private void uploadExistingCsv(Path csv, String uploadType) {
         preview(csv);
-        upload.setUploadType(uploadType);
-        if (uploadType.toLowerCase(Locale.ROOT).contains("update")) {
-            upload.setExistingDetails("Override with file");
-        }
-        upload.setNewUserPassword("Field required");
-        upload.commit();
-        captureResults(uploadType + " upload");
+        Runnable config = () -> {
+            upload.setUploadType(uploadType);
+            if (uploadType.toLowerCase(Locale.ROOT).contains("update")) {
+                upload.setExistingDetails("Override with file");
+            }
+            upload.setNewUserPassword("Field required");
+        };
+        config.run();
+        PREVIEW_OPTIONS_BEFORE_COMMIT.set(config);
+        commitUploadAndCapture(uploadType + " upload");
     }
 
     private boolean exists(String email) {
-        return idFor(email) != null;
+        for (int attempt = 0; attempt < 10; attempt++) {
+            try {
+                if (ApiClient.findUserIdByEmail(email) != null) return true;
+            } catch (RuntimeException ignored) {}
+            try {
+                String id = idFor(email);
+                if (id != null) return true;
+                return false;
+            } catch (AssertionError filterFailed) {
+                if (String.valueOf(filterFailed.getMessage()).contains("Browse users filter did not apply")) {
+                    ctx.page.waitForTimeout(2_000);
+                    continue;
+                }
+                throw filterFailed;
+            }
+        }
+        try {
+            return ApiClient.findUserIdByEmail(email) != null;
+        } catch (RuntimeException wsUnavailable) {
+            return false;
+        }
     }
 
     /**
@@ -167,12 +388,40 @@ public final class UploadUsersSteps {
     }
 
     private String idFor(String email) {
+        String fromResults = idFromLastResults(email);
+        if (fromResults != null) return fromResults;
+        try {
+            Long ws = ApiClient.findUserIdByEmail(email);
+            if (ws != null) return String.valueOf(ws);
+        } catch (RuntimeException ignored) {}
         return admin.lookupUserIdByEmail(email);
+    }
+
+    /** Moodle prints "New user &lt;line&gt; &lt;id&gt; &lt;username&gt; … &lt;email&gt;" on the results page. */
+    private String idFromLastResults(String email) {
+        if (lastResults == null || email == null) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "(?i)new user\\s+\\d+\\s+(\\d+)\\s+\\S+[\\s\\S]*?"
+                        + java.util.regex.Pattern.quote(email))
+                .matcher(lastResults);
+        return m.find() ? m.group(1) : null;
+    }
+
+    private boolean resultsListEmail(String email) {
+        return lastResults != null
+                && lastResults.toLowerCase(Locale.ROOT).contains(email.toLowerCase(Locale.ROOT));
+    }
+
+    private void assertUserCreatedPerResults(String email, String label) {
+        assertTrue(resultCount("Users created") >= 1 || resultsListEmail(email),
+                label + " — no created user in results: " + lastResults);
+        assertTrue(resultsListEmail(email) || exists(email),
+                label + " — user not created: " + lastResults);
     }
 
     private Page login(String username, String password) {
         closeUserContext();
-        userContext = ctx.browser.newContext(new Browser.NewContextOptions()
+        userContext = BrowserUi.newContext(ctx.browser, new Browser.NewContextOptions()
                 .setBaseURL(Settings.BASE_URL).setIgnoreHTTPSErrors(true));
         Page page = userContext.newPage();
         page.setDefaultTimeout(Settings.DEFAULT_TIMEOUT_MS);
@@ -197,46 +446,81 @@ public final class UploadUsersSteps {
     }
 
     private void commitNewOnly(String what) {
-        upload.setUploadType("Add new only");
-        upload.setNewUserPassword("Field required");
-        upload.commit();
-        captureResults(what);
+        commitNewOnly(what, null);
+    }
+
+    private void commitNewOnly(String what, Runnable extraPreviewOptions) {
+        Runnable config = () -> {
+            if (extraPreviewOptions != null) {
+                extraPreviewOptions.run();
+            }
+            upload.setUploadType("Add new only");
+            upload.setNewUserPassword("Field required");
+        };
+        config.run();
+        PREVIEW_OPTIONS_BEFORE_COMMIT.set(config);
+        commitUploadAndCapture(what);
     }
 
     private void commitExistingUpdate(String what, String detailsMode, boolean updatePassword) {
-        upload.setUploadType("Update existing users only");
-        if (detailsMode != null && !detailsMode.isBlank()) upload.setExistingDetails(detailsMode);
-        if (updatePassword) upload.setExistingPassword("Update");
-        upload.commit();
-        captureResults(what);
+        Runnable config = () -> {
+            upload.setUploadType("Update existing users only");
+            if (detailsMode != null && !detailsMode.isBlank()) upload.setExistingDetails(detailsMode);
+            if (updatePassword) upload.setExistingPassword("Update");
+        };
+        config.run();
+        PREVIEW_OPTIONS_BEFORE_COMMIT.set(config);
+        commitUploadAndCapture(what);
+    }
+
+    private int safeLocatorCount(com.microsoft.playwright.Locator locator) {
+        for (int attempt = 0; attempt < 6; attempt++) {
+            try {
+                return locator.count();
+            } catch (RuntimeException e) {
+                if (attempt == 5) throw e;
+                ctx.page.waitForTimeout(400);
+            }
+        }
+        return 0;
     }
 
     private com.microsoft.playwright.Locator participantRow(String emailOrUsername) {
-        ctx.page.navigate(Settings.BASE_URL + "/user/index.php?id=" + courseId + "&perpage=5000",
-                new Page.NavigateOptions()
-                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
-                        .setTimeout(45_000));
-        ctx.page.waitForTimeout(1_500);
-        com.microsoft.playwright.Locator row = ctx.page.locator("table tbody tr")
-                .filter(new com.microsoft.playwright.Locator.FilterOptions().setHasText(emailOrUsername));
-        if (row.count() == 0 && emailOrUsername.contains("@")) {
+        com.microsoft.playwright.Locator row = null;
+        for (int attempt = 0; attempt < 12; attempt++) {
             try {
-                Long id = ApiClient.findUserIdByEmail(emailOrUsername);
-                if (id != null) {
-                    row = ctx.page.locator("table tbody tr")
-                            .filter(new com.microsoft.playwright.Locator.FilterOptions().setHas(
-                                    ctx.page.locator("a[href*='id=" + id + "']")));
+                ctx.page.navigate(Settings.BASE_URL + "/user/index.php?id=" + courseId + "&perpage=5000",
+                        new Page.NavigateOptions()
+                                .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.COMMIT)
+                                .setTimeout(60_000));
+                ctx.page.waitForTimeout(1_500);
+                row = ctx.page.locator("table tbody tr")
+                        .filter(new com.microsoft.playwright.Locator.FilterOptions().setHasText(emailOrUsername));
+                if (safeLocatorCount(row) == 0 && emailOrUsername.contains("@")) {
+                    try {
+                        Long id = ApiClient.findUserIdByEmail(emailOrUsername);
+                        if (id != null) {
+                            row = ctx.page.locator("table tbody tr")
+                                    .filter(new com.microsoft.playwright.Locator.FilterOptions().setHas(
+                                            ctx.page.locator("a[href*='id=" + id + "']")));
+                        }
+                    } catch (RuntimeException ignored) {
+                        // fall through
+                    }
                 }
-            } catch (RuntimeException ignored) {
-                // The WS token may not expose core_user_get_users; the text match remains authoritative.
+                if (safeLocatorCount(row) > 0) return row.first();
+            } catch (RuntimeException navigating) {
+                // parallel navigation can tear down the execution context mid-probe
             }
+            ctx.page.waitForTimeout(2_000);
         }
-        assertTrue(row.count() > 0, "course participant row missing for " + emailOrUsername);
+        assertTrue(row != null && safeLocatorCount(row) > 0,
+                "course participant row missing for " + emailOrUsername);
         return row.first();
     }
 
     private String editUserValue(String userId, String selector) {
-        ctx.page.navigate(Settings.BASE_URL + "/user/editadvanced.php?id=" + userId);
+        admin.openEditUser(userId);
         com.microsoft.playwright.Locator field = ctx.page.locator(selector).first();
         assertTrue(field.count() > 0, "user edit field missing: " + selector);
         return field.inputValue();
@@ -312,15 +596,21 @@ public final class UploadUsersSteps {
         preview(basicCsv("valid3", a, b, c));
         assertTrue(upload.previewContains(a.username) && upload.previewContains(b.username)
                 && upload.previewContains(c.username), "preview does not contain all three CSV users");
-        configureNewOnlyAndCommit();
+        upload.setUploadType("Add new only");
+        upload.setNewUserPassword("Field required");
+        try {
+            commitCaptureContinue("Add new only upload");
+            continued = upload.initialFormVisible();
+        } finally {
+            endUploadWizard();
+        }
     }
 
     @Then("all CSV users are created and one can log in")
     public void allCsvUsersCreated() {
         assertEquals(resultCount("Users created"), users.size(),
                 "Upload users did not create every CSV row: " + lastResults);
-        upload.continueFromResults();
-        continued = upload.initialFormVisible();
+        assertTrue(continued, "Continue did not return to Upload users initial form");
         String listed = lastResults.toLowerCase(Locale.ROOT);
         for (CsvUser user : users) {
             assertTrue(listed.contains(user.username.toLowerCase(Locale.ROOT))
@@ -334,17 +624,24 @@ public final class UploadUsersSteps {
 
     @Then("continuing from results returns to Upload users")
     public void continuingReturnsToUploadUsers() {
-        assertTrue(continued, "Continue did not return to Upload users initial form");
+        if (!upload.initialFormVisible()) {
+            upload.continueFromResults();
+        }
+        assertTrue(upload.initialFormVisible(), "Continue did not return to Upload users initial form");
     }
 
     @When("admin previews a valid Upload users CSV and cancels")
     public void previewAndCancel() {
         CsvUser a = csvUser("cancel_a");
         CsvUser b = csvUser("cancel_b");
-        preview(basicCsv("cancel", a, b));
-        assertTrue(upload.previewContains(a.username) && upload.previewContains(b.username),
-                "preview does not show CSV usernames");
-        upload.cancel();
+        try {
+            preview(basicCsv("cancel", a, b));
+            assertTrue(upload.previewContains(a.username) && upload.previewContains(b.username),
+                    "preview does not show CSV usernames");
+            upload.cancel();
+        } finally {
+            endUploadWizard();
+        }
     }
 
     @Then("the previewed users were not created")
@@ -356,18 +653,22 @@ public final class UploadUsersSteps {
 
     @Then("Upload users rejects no file and an empty file")
     public void rejectNoAndEmptyFile() {
-        upload.open();
-        upload.submitInitial();
-        assertFalse(upload.previewVisible(), "Upload users accepted submission with no file");
+        runUploadWizard(() -> {
+            upload.open();
+            upload.dismissBlockingDialogue();
+            upload.submitInitial();
+            assertFalse(upload.previewVisible(), "Upload users accepted submission with no file");
 
-        upload.open();
-        // The picker itself may refuse the zero-byte file with an error dialogue; that is already the
-        // rejection, and Moodle then has no file to submit.
-        boolean attached = upload.chooseCsv(UploadUsersCsv.empty("empty_" + stamp));
-        if (attached) {
+            upload.open();
+            upload.dismissBlockingDialogue();
+            boolean attached = upload.chooseCsv(UploadUsersCsv.empty("empty_" + stamp));
+            upload.dismissBlockingDialogue();
+            System.out.println("[UU-S3] zero-byte CSV " + (attached
+                    ? "attached — checking that Upload users refuses it"
+                    : "refused by the file picker (error dialogue dismissed)"));
             upload.submitInitial();
             assertFalse(upload.previewVisible(), "Upload users accepted a zero-byte CSV");
-        }
+        });
     }
 
     @Then("Upload users rejects a CSV missing the email header")
@@ -389,25 +690,31 @@ public final class UploadUsersSteps {
                                              java.util.function.Function<CsvUser, List<String>> row) {
         CsvUser user = csvUser("missing_" + missing);
         Path csv = UploadUsersCsv.write("missing_" + missing + "_" + stamp, headers, List.of(row.apply(user)));
-        upload.open();
-        upload.chooseCsv(csv);
-        upload.submitInitial();
-        // Moodle 4.5 still opens the preview when a required column is absent; it refuses to create
-        // until the missing field is supplied. Do not treat reaching preview as a pass.
-        if (upload.previewVisible()) {
-            upload.setUploadType("Add new only");
-            upload.setNewUserPassword("Field required");
-            upload.commit();
-        }
+        runUploadWizard(() -> {
+            upload.open();
+            upload.chooseCsv(csv);
+            upload.submitInitial();
+            if (upload.previewVisible()) {
+                upload.setUploadType("Add new only");
+                upload.setNewUserPassword("Field required");
+                upload.commit();
+            }
+        });
         if (upload.resultVisible()) {
             lastResults = upload.resultText();
-            assertTrue(resultCount("Users created") == 0 || resultCount("Errors") >= 1,
+            System.out.println("[UU-S4] CSV without '" + missing + "' header -> results: " + lastResults);
+            assertEquals(resultCount("Users created"), 0,
                     "CSV without " + missing + " header created users: " + lastResults);
-            assertTrue(lastResults.toLowerCase(Locale.ROOT).contains(missing)
-                            || lastResults.toLowerCase(Locale.ROOT).contains("error")
-                            || lastResults.toLowerCase(Locale.ROOT).contains("missing"),
-                    "CSV without " + missing + " header did not report the missing field: " + lastResults);
+        } else {
+            String outcome = ctx.page.locator("#region-main, body").first().innerText();
+            System.out.println("[UU-S4] CSV without '" + missing + "' header -> refused: " + outcome);
+            String text = outcome.toLowerCase(Locale.ROOT);
+            assertTrue(text.contains(missing) || text.contains("error") || text.contains("missing")
+                            || text.contains("required") || text.contains("must supply")
+                            || text.contains("supply a value"),
+                    "CSV without " + missing + " header was refused without saying why: " + outcome);
         }
+        assertFalse(exists(user.email), "CSV without " + missing + " header created " + user.email);
     }
 
     /**
@@ -432,8 +739,7 @@ public final class UploadUsersSteps {
         preview(csv);
         upload.setUploadType("Add new only");
         upload.setNewUserPassword("Field required");
-        upload.commit();
-        captureResults("mixed CSV upload");
+        commitUploadAndCapture("mixed CSV upload");
     }
 
     @Then("the valid row is created and malformed rows report errors")
@@ -441,10 +747,8 @@ public final class UploadUsersSteps {
         int errors = Math.max(resultCount("Errors"),
                 UploadUsersPage.rowsContaining(lastResults, "User not added"));
         assertTrue(errors >= 1, "malformed rows produced no row-level error: " + lastResults);
-        assertTrue(resultCount("Users created") >= 1,
-                "no row of the mixed CSV was created: " + lastResults);
-        assertTrue(exists(validUser.email),
-                "valid row from mixed CSV was not created — results were: " + lastResults);
+        assertUserCreatedPerResults(validUser.email,
+                "valid row from mixed CSV was not created");
     }
 
     @Given("an existing user for Upload users")
@@ -523,8 +827,7 @@ public final class UploadUsersSteps {
         upload.setUploadType("Add new only");
         upload.setNewUserPassword("Field required");
         upload.setPreventEmailDuplicates(true);   // hidden + forced to Yes unless same-email accounts are allowed
-        upload.commit();
-        captureResults("duplicate-email upload");
+        commitUploadAndCapture("duplicate-email upload");
     }
 
     @Then("the duplicate-email user is not created")
@@ -542,8 +845,7 @@ public final class UploadUsersSteps {
         preview(basicCsv("weak", weak));
         upload.setUploadType("Add new only");
         upload.setNewUserPassword("Field required");
-        upload.commit();
-        captureResults("weak-password upload");
+        commitUploadAndCapture("weak-password upload");
     }
 
     /**
@@ -556,8 +858,8 @@ public final class UploadUsersSteps {
         int weak = UploadUsersPage.resultCountAny(lastResults,
                 "Users having a weak password", "Users weak password");
         assertTrue(weak >= 1, "weak password was not reported as weak: " + lastResults);
-        assertTrue(exists(newUser.email),
-                "weak-password user was not created — results were: " + lastResults);
+        assertUserCreatedPerResults(newUser.email,
+                "weak-password user was not created");
         Page page = login(newUser.username, "weak");
         String body = page.locator("body").innerText().toLowerCase(Locale.ROOT);
         assertTrue(page.url().contains("/login/change_password.php") || body.contains("change password"),
@@ -571,6 +873,16 @@ public final class UploadUsersSteps {
 
     @Then("the CSV user cannot log in")
     public void csvUserCannotLogin() {
+        closeUserContext();
+        for (int attempt = 0; attempt < 6; attempt++) {
+            Page p = login(existing.username, existing.password);
+            if (!Auth.isLoggedIn(p)) {
+                closeUserContext();
+                return;
+            }
+            closeUserContext();
+            ctx.page.waitForTimeout(2_000);
+        }
         assertFalse(Auth.isLoggedIn(login(existing.username, existing.password)),
                 "CSV-suspended user could log in");
     }
@@ -594,14 +906,17 @@ public final class UploadUsersSteps {
         preview(csv);
         upload.setUploadType("Update existing users only");
         upload.setAllowSuspends(allow);
-        upload.commit();
-        captureResults(name + " upload");
+        commitUploadAndCapture(name + " upload");
+        assertTrue(resultCount("Users updated") >= 1,
+                name + " CSV did not update user " + user.username + ": " + lastResults);
     }
 
     @When("admin uploads deleted one with Allow deletes off and deleted one with Allow deletes on")
     public void deleteAllowedAndBlocked() {
-        uploadDeleted(existing.username, false, "delete_blocked");
-        uploadDeleted(secondExisting.username, true, "delete_allowed");
+        runUploadWizard(() -> {
+            uploadDeleted(existing.username, false, "delete_blocked");
+            uploadDeleted(secondExisting.username, true, "delete_allowed");
+        });
     }
 
     private void uploadDeleted(String username, boolean allow, String name) {
@@ -611,14 +926,28 @@ public final class UploadUsersSteps {
         preview(csv);
         upload.setUploadType("Update existing users only");
         upload.setAllowDeletes(allow);
-        upload.commit();
-        captureResults(name + " upload");
+        commitUploadAndCapture(name + " upload");
     }
 
     @Then("the blocked-delete user remains and the allowed-delete user is deleted")
     public void deleteOutcomes() {
         assertTrue(admin.userProfilePresent(String.valueOf(existing.id)),
                 "Allow deletes=No still deleted the user");
+        assertTrue(resultCount("Users deleted") >= 1,
+                "Allow deletes=Yes did not report a deletion: " + lastResults);
+        for (int i = 0; i < 15; i++) {
+            try {
+                if (ApiClient.findUserIdByEmail(secondExisting.email) == null
+                        && !admin.userProfilePresent(String.valueOf(secondExisting.id))) {
+                    return;
+                }
+            } catch (RuntimeException ignored) {
+                if (!admin.userProfilePresent(String.valueOf(secondExisting.id))) {
+                    return;
+                }
+            }
+            ctx.page.waitForTimeout(2_000);
+        }
         assertFalse(admin.userProfilePresent(String.valueOf(secondExisting.id)),
                 "Allow deletes=Yes did not delete the user");
     }
@@ -656,8 +985,7 @@ public final class UploadUsersSteps {
         preview(csv);
         upload.setUploadType("Update existing users only");
         upload.setAllowRenames(allow);
-        upload.commit();
-        captureResults(name + " upload");
+        commitUploadAndCapture(name + " upload");
     }
 
     @Then("the blocked rename is unchanged and the allowed rename succeeds")
@@ -700,7 +1028,7 @@ public final class UploadUsersSteps {
      */
     @Then("only the valid-course user is enrolled in the course")
     public void courseEnrolOutcome() {
-        assertTrue(resultCount("Errors") >= 0, "no upload results were captured: " + lastResults);
+        assertFalse(lastResults.isBlank(), "no upload results were captured");
         ctx.page.navigate(Settings.BASE_URL + "/user/index.php?id=" + courseId + "&perpage=5000",
                 new Page.NavigateOptions()
                         .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
@@ -756,8 +1084,16 @@ public final class UploadUsersSteps {
 
     @Then("the user belongs to the cohort and profile values persist")
     public void cohortProfileOutcome() {
-        assertTrue(admin.cohortHasMember(cohortId, newUser.username),
-                "cohort1 did not add uploaded user to cohort");
+        boolean inCohort = false;
+        for (int i = 0; i < 15; i++) {
+            if (admin.cohortHasMember(cohortId, newUser.username)
+                    || admin.cohortHasMember(cohortId, newUser.email)) {
+                inCohort = true;
+                break;
+            }
+            ctx.page.waitForTimeout(2_000);
+        }
+        assertTrue(inCohort, "cohort1 did not add uploaded user to cohort");
         String id = idFor(newUser.email);
         assertNotNull(id, "uploaded cohort/profile user is missing — results were: " + lastResults);
         ctx.page.navigate(Settings.BASE_URL + "/user/editadvanced.php?id=" + id);
@@ -772,6 +1108,7 @@ public final class UploadUsersSteps {
     @Then("a delimiter mismatch creates no user")
     public void delimiterMismatch() {
         newUser = csvUser("delimiter");
+        runUploadWizard(() -> {
         upload.open();
         upload.chooseCsv(basicCsv("delimiter", newUser));
         upload.setDelimiter("tab");
@@ -781,6 +1118,7 @@ public final class UploadUsersSteps {
                     "comma CSV parsed normally while Tab delimiter was selected");
         }
         assertFalse(exists(newUser.email), "delimiter-mismatch CSV created a user");
+        });
     }
 
     @Then("a student cannot access Upload users")
@@ -801,15 +1139,14 @@ public final class UploadUsersSteps {
         preview(basicCsv("append", duplicate));
         upload.setUploadType("Add all");
         upload.setNewUserPassword("Field required");
-        upload.commit();
-        captureResults("Add all append upload");
+        commitUploadAndCapture("Add all append upload");
     }
 
     @Then("a numbered username is created and the original is unchanged")
     public void appendOutcome() {
         String id = idFor(newUser.email);
         assertNotNull(id, "Add all did not create a second user — results were: " + lastResults);
-        ctx.page.navigate(Settings.BASE_URL + "/user/editadvanced.php?id=" + id);
+        admin.openEditUser(id);
         String actual = ctx.page.locator("#id_username").inputValue();
         // uu_increment_username() bumps a trailing number rather than appending one, so
         // autotest_1000 becomes autotest_1001 — compare the shared non-numeric stem.
@@ -836,25 +1173,26 @@ public final class UploadUsersSteps {
             previewUsers.add(new CsvUser(username, "Preview" + i, "User",
                     username + "@example.com", STRONG_PASSWORD));
         }
-        upload.open();
-        upload.chooseCsv(basicCsv("preview_limit", previewUsers.toArray(CsvUser[]::new)));
-        upload.setPreviewRows(10);
-        upload.submitInitial();
-        assertTrue(upload.previewVisible(), "Upload users preview did not open");
-        assertTrue(upload.previewContains(previewUsers.get(0).username)
-                        && upload.previewContains(previewUsers.get(9).username),
-                "the selected ten-row preview did not show rows 1 through 10");
-        assertFalse(upload.previewContains(previewUsers.get(10).username),
-                "Preview rows=10 displayed the eleventh CSV record");
-        upload.cancel();
+        runUploadWizard(() -> {
+            upload.open();
+            upload.chooseCsv(basicCsv("preview_limit", previewUsers.toArray(CsvUser[]::new)));
+            upload.setPreviewRows(10);
+            upload.submitInitial();
+            assertTrue(upload.previewVisible(), "Upload users preview did not open");
+            assertTrue(upload.previewContains(previewUsers.get(0).username)
+                            && upload.previewContains(previewUsers.get(9).username),
+                    "the selected ten-row preview did not show rows 1 through 10");
+            assertFalse(upload.previewContains(previewUsers.get(10).username),
+                    "Preview rows=10 displayed the eleventh CSV record");
+            upload.cancel();
+        });
     }
 
     @Then("Force password change All is enforced for a new CSV user")
     public void forcePasswordChangeAll() {
         newUser = csvUser("force_change");
         preview(basicCsv("force_change", newUser));
-        upload.setForcePasswordChange("All");
-        commitNewOnly("force-password-change upload");
+        commitNewOnly("force-password-change upload", () -> upload.setForcePasswordChange("All"));
         assertEquals(resultCount("Users created"), 1, "force-change user was not created: " + lastResults);
         Page page = login(newUser.username, newUser.password);
         String body = page.locator("body").innerText().toLowerCase(Locale.ROOT);
@@ -912,25 +1250,46 @@ public final class UploadUsersSteps {
     @Then("selected new CSV users are forwarded to Bulk user actions")
     public void selectForBulkActions() {
         newUser = csvUser("bulk_selected");
-        preview(basicCsv("bulk_selected", newUser));
-        upload.setUploadType("Add new only");
-        upload.setNewUserPassword("Field required");
-        upload.setBulkSelection("New users");
-        upload.commit();
-        captureResults("bulk-selection upload");
-        upload.continueFromResults();
-        assertTrue(admin.bulkUserActionsReady(30_000),
-                "Continue did not open Bulk user actions: " + ctx.page.url());
-        int selected = admin.waitForBulkSelectedUsers(30_000);
-        String selection = admin.bulkSelectedUsersText();
-        assertTrue(selected >= 1 && selected <= 5, "the Selected box holds " + selected
-                + " users instead of just the uploaded ones: " + selection);
-        // The Selected box labels users by full name, not by the CSV username or email.
-        String fullName = (newUser.firstName + " " + newUser.lastName).toLowerCase(Locale.ROOT);
-        assertTrue(selection.toLowerCase(Locale.ROOT).contains(fullName),
-                "the uploaded user is not in the bulk selection: " + selection);
-        assertTrue(admin.chooseBulkAction("Force password change"),
-                "no bulk action could be chosen for the uploaded selection");
+        runUploadWizard(() -> {
+            preview(basicCsv("bulk_selected", newUser));
+            upload.setUploadType("Add new only");
+            upload.setNewUserPassword("Field required");
+            upload.setBulkSelection("New users");
+            commitCaptureContinue("bulk-selection upload");
+        });
+        RuntimeException last = null;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            try {
+                if (!ctx.page.url().toLowerCase(Locale.ROOT).contains("user_bulk")) {
+                    admin.openBulkUserActions();
+                }
+                assertTrue(admin.bulkUserActionsReady(45_000),
+                        "Continue did not open Bulk user actions: " + ctx.page.url());
+                int selected = admin.waitForBulkSelectedUsers(30_000);
+                String selection = admin.bulkSelectedUsersText();
+                assertTrue(selected >= 1 && selected <= 5, "the Selected box holds " + selected
+                        + " users instead of just the uploaded ones: " + selection);
+                String fullName = (newUser.firstName + " " + newUser.lastName).toLowerCase(Locale.ROOT);
+                assertTrue(selection.toLowerCase(Locale.ROOT).contains(fullName),
+                        "the uploaded user is not in the bulk selection: " + selection);
+                String problem = admin.applyBulkAction("Force password change");
+                assertTrue(problem == null, "bulk Force password change was not applied: " + problem);
+                Page page = login(newUser.username, newUser.password);
+                String body = page.locator("body").innerText().toLowerCase(Locale.ROOT);
+                assertTrue(page.url().contains("/login/change_password.php") || body.contains("change password"),
+                        "bulk Force password change did not force a reset at login: " + page.url());
+                return;
+            } catch (RuntimeException e) {
+                last = e;
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (attempt < 3 && msg.contains("Execution context was destroyed")) {
+                    ctx.page.waitForTimeout(1_500);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (last != null) throw last;
     }
 
     @Then("group1 creates a missing course group and assigns the CSV user")
@@ -988,23 +1347,37 @@ public final class UploadUsersSteps {
 
     @Then("sysrole1 assigns and removes the Manager system role")
     public void systemRoleAssignAndRemove() {
-        existing = seed();
-        systemRoleUsername = existing.username;
-        Path assign = UploadUsersCsv.write("sysrole_assign_" + stamp,
-                List.of("username", "sysrole1"),
-                List.of(UploadUsersCsv.row(existing.username, "manager")));
-        preview(assign);
-        commitExistingUpdate("system-role assign", null, false);
+        runUploadWizard(() -> {
+            existing = seed();
+            systemRoleUsername = existing.username;
+            Path assign = UploadUsersCsv.write("sysrole_assign_" + stamp,
+                    List.of("username", "sysrole1"),
+                    List.of(UploadUsersCsv.row(existing.username, "manager")));
+            preview(assign);
+            commitExistingUpdate("system-role assign", null, false);
+        });
         roleAssign.openSystemRoleAssign(MANAGER_ROLE_ID);
         assertTrue(roleAssign.userAssigned(existing.username),
                 "sysrole1=manager did not assign the Manager role");
 
-        Path remove = UploadUsersCsv.write("sysrole_remove_" + stamp,
-                List.of("username", "sysrole1"),
-                List.of(UploadUsersCsv.row(existing.username, "-manager")));
-        preview(remove);
-        commitExistingUpdate("system-role removal", null, false);
-        roleAssign.openSystemRoleAssign(MANAGER_ROLE_ID);
+        runUploadWizard(() -> {
+            Path remove = UploadUsersCsv.write("sysrole_remove_" + stamp,
+                    List.of("username", "sysrole1"),
+                    List.of(UploadUsersCsv.row(existing.username, "-manager")));
+            preview(remove);
+            commitExistingUpdate("system-role removal", null, false);
+        });
+        String removal = lastResults == null ? "" : lastResults.toLowerCase(Locale.ROOT);
+        assertTrue(removal.contains("unassigned system role"),
+                "system-role removal CSV did not apply: " + lastResults);
+        for (int i = 0; i < 12; i++) {
+            roleAssign.openSystemRoleAssign(MANAGER_ROLE_ID);
+            if (!roleAssign.userAssigned(existing.username)) {
+                systemRoleUsername = null;
+                return;
+            }
+            ctx.page.waitForTimeout(2_500);
+        }
         assertFalse(roleAssign.userAssigned(existing.username),
                 "sysrole1=-manager did not remove the Manager role");
         systemRoleUsername = null;
@@ -1055,6 +1428,8 @@ public final class UploadUsersSteps {
         newUser = trackedCsvUser(username, "  Trimmed  ", "Comma&#44;Name", email, STRONG_PASSWORD);
         preview(basicCsv("format_edges", newUser));
         commitNewOnly("format-edge upload");
+        assertFalse(upload.serverTempFileError(),
+                "format-edge upload hit temp-file error: " + lastResults);
         String id = idFor(email);
         assertNotNull(id, "format-edge user was not created: " + lastResults);
         assertEquals(editUserValue(id, "#id_firstname"), "Trimmed",
@@ -1085,7 +1460,13 @@ public final class UploadUsersSteps {
         if (scenario.getSourceTagNames().stream().noneMatch(tag -> tag.startsWith("@UU-S"))) {
             return;
         }
+        releaseUploadWizardLock();
         closeUserContext();
+        if (!com.nuvepro.moodle.helpers.CleanupPolicy.runScenarioCleanup()) {
+            registerUploadedUsersInManifest();
+            System.out.println("[UploadUsers] deferCleanup=true — artefacts left for @cleanup-users / manifest");
+            return;
+        }
         if (systemRoleUsername != null) {
             try {
                 roleAssign.openSystemRoleAssign(MANAGER_ROLE_ID);
@@ -1106,6 +1487,21 @@ public final class UploadUsersSteps {
         }
         for (String cohort : cohorts) {
             try { admin.cohortDelete(cohort); } catch (Throwable ignored) {}
+        }
+    }
+
+    /**
+     * Deferred-cleanup path only. Runs at teardown, never right after a commit: each lookup opens
+     * Browse users, which would leave the Upload users results page before later steps use it.
+     */
+    private void registerUploadedUsersInManifest() {
+        for (CsvUser u : users) {
+            try {
+                Long id = uploadedUserId(u.email);
+                if (id != null) {
+                    com.nuvepro.moodle.helpers.AutomationManifest.registerUser(id, u.username);
+                }
+            } catch (Throwable ignored) {}
         }
     }
 }

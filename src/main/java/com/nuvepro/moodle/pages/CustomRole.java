@@ -21,14 +21,13 @@ public class CustomRole extends BasePage {
         navigate("/admin/roles/define.php?action=add");
         page.locator("#id_resettype").waitFor();
         page.locator("#id_resettype").selectOption(presetArchetype);
-        page.locator("#id_submitbutton").click();                 // Continue
-        page.waitForTimeout(2_500);
+        submitAndAwaitNewPage(page.locator("#id_submitbutton"));  // Continue
+        page.locator("#shortname").waitFor();
         page.locator("#shortname").fill(shortname);
         page.locator("#name").fill(name);
         Locator courseCtx = page.locator("input[type=checkbox][name='contextlevel50']");
         if (courseCtx.count() > 0 && !courseCtx.first().isChecked()) courseCtx.first().check();
-        page.locator("input[value='Create this role']").first().click();
-        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        submitAndAwaitNewPage(page.locator("input[value='Create this role']").first());
         page.waitForTimeout(2_000);
         Matcher m = Pattern.compile("roleid=(\\d+)").matcher(page.url());
         if (m.find()) return m.group(1);
@@ -57,13 +56,19 @@ public class CustomRole extends BasePage {
     public void deleteRole(String roleId) {
         if (roleId == null) return;
         navigate("/admin/roles/define.php?action=delete&roleid=" + roleId);
-        page.waitForTimeout(1_000);
+        page.waitForTimeout(1_500);
         Locator confirm = page.locator("input[value='Yes'], input[value='Delete'], "
-                + "button:has-text('Yes'), button:has-text('Delete'), #region-main .btn-primary");
-        if (confirm.count() > 0 && confirm.first().isVisible()) {
-            confirm.first().click();
-            page.waitForTimeout(1_500);
+                + "button:has-text('Yes'), button:has-text('Delete'), "
+                + "#region-main button[type='submit'], #region-main .btn-primary");
+        for (int i = 0; i < confirm.count(); i++) {
+            Locator btn = confirm.nth(i);
+            if (btn.isVisible()) {
+                btn.click();
+                break;
+            }
         }
+        page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+        page.waitForTimeout(2_000);
     }
 
     /** Whether the role appears in the "Enrol users" role dropdown for a course. */

@@ -93,6 +93,20 @@ public abstract class BasePage {
         }
     }
 
+    /**
+     * Click a control whose POST can run longer than the default action timeout (bulk uploads,
+     * restores, big saves). The caller must then wait for its own outcome marker; a plain click()
+     * fails after 15s on "waiting for scheduled navigations" even though the server finished.
+     */
+    protected void clickSlowSubmit(Locator control) {
+        control.click(new Locator.ClickOptions().setNoWaitAfter(true));
+    }
+
+    /** Submit a form and wait for the next page; see {@link com.nuvepro.moodle.helpers.FormSubmit}. */
+    protected boolean submitAndAwaitNewPage(Locator control) {
+        return com.nuvepro.moodle.helpers.FormSubmit.andAwaitNewPage(page, control);
+    }
+
     /** True when a Moodle mform shows a visible, non-empty field/form validation message. */
     protected boolean hasVisibleFormValidationError() {
         try {

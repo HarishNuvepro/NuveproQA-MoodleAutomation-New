@@ -221,11 +221,31 @@ public class LabTemplatesPage extends BasePage {
                 && (body.contains("resource") || body.contains("description"));
     }
 
-    public boolean viewHasMutationControl() {
-        return page.locator(
-                "#region-main a:has-text('Delete'), #region-main button:has-text('Delete'), "
-                        + "#region-main a:has-text('Edit'), #region-main button:has-text('Edit')")
-                .count() > 0;
+    /** View-details footer next to Cancel (excludes Moodle messaging chrome). */
+    private static final String VIEW_TEMPLATE_FOOTER = ".col-md-12:has(#cancelBtn)";
+
+    public boolean viewHasEditAction() {
+        Locator edit = page.locator(
+                "a[href*='editlabtemplate.php'], " + VIEW_TEMPLATE_FOOTER + " a.btn-primary");
+        for (int i = 0; i < edit.count(); i++) {
+            try {
+                if (edit.nth(i).isVisible()) return true;
+            } catch (RuntimeException ignored) {}
+        }
+        return false;
+    }
+
+    public boolean viewHasDeleteAction() {
+        Locator delete = page.locator(
+                "a[href*='deletelabtemplate'], " + VIEW_TEMPLATE_FOOTER + " #deleteBtn, "
+                        + VIEW_TEMPLATE_FOOTER + " .btn:has-text('Delete lab template'), "
+                        + VIEW_TEMPLATE_FOOTER + " input[type='submit'][value*='Delete']");
+        for (int i = 0; i < delete.count(); i++) {
+            try {
+                if (delete.nth(i).isVisible()) return true;
+            } catch (RuntimeException ignored) {}
+        }
+        return false;
     }
 
     public boolean scriptExecuted() {

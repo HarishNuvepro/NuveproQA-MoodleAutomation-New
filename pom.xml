@@ -19,11 +19,14 @@
         <!-- default suite; override with a profile -->
         <suiteXmlFile>testng-fast.xml</suiteXmlFile>
         <!-- Cucumber scenario filter: fast = non-destructive; slow profile flips to provisioning -->
-        <cucumber.tags>not @provisioning and not @sandbox-cleanup</cucumber.tags>
-        <!-- Browser defaults; -Pwatch sets headed + slowmo so you can watch -->
+        <cucumber.tags>not @provisioning and not @skip and not @deviation and not @sandbox-cleanup and not @module-cleanup and not @assessment-cleanup</cucumber.tags>
+        <!-- Browser defaults; -Pwatch sets headed. Default slowmo 650ms so actions are visible when headed. -->
         <headless>true</headless>
-        <slowmo>0</slowmo>
+        <slowmo>650</slowmo>
         <sandbox.parallel>false</sandbox.parallel>
+        <parallel.browsers>5</parallel.browsers>
+        <!-- Set via CLI (-Dcucumber.features=...); empty = all runners use @CucumberOptions paths -->
+        <cucumber.features></cucumber.features>
     </properties>
 
     <dependencies>
@@ -67,6 +70,27 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>require-jdk17</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[17,)</version>
+                                    <message>JDK 17+ is required. Run via .\mvnw.cmd (auto-selects an installed JDK 17+) or set JAVA_HOME to a JDK 17+ install.</message>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
                 <configuration>
@@ -75,9 +99,11 @@
                     </suiteXmlFiles>
                     <systemPropertyVariables>
                         <cucumber.filter.tags>${cucumber.tags}</cucumber.filter.tags>
+                        <cucumber.features>${cucumber.features}</cucumber.features>
                         <headless>${headless}</headless>
                         <slowmo>${slowmo}</slowmo>
                         <sandbox.parallel>${sandbox.parallel}</sandbox.parallel>
+                        <parallel.browsers>${parallel.browsers}</parallel.browsers>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
@@ -104,17 +130,63 @@
                 <slowmo>800</slowmo>
             </properties>
         </profile>
+        <!-- Auto-activates when -Dcucumber.features=... is set. Runs ONLY RunCucumberTest so parallel
+             sandbox runners do not pick up the filtered feature (Playwright pipe-closed failures). -->
+        <profile>
+            <id>single-feature</id>
+            <activation>
+                <property>
+                    <name>cucumber.features</name>
+                </property>
+            </activation>
+            <properties>
+                <suiteXmlFile>testng-watch.xml</suiteXmlFile>
+            </properties>
+        </profile>
         <!-- Complete Sandbox suite with five capped Chromium workers.
              Sandbox student scenarios remain in one lane; independent Manage Labs scenarios
              run concurrently. The four deletes are fired together under the same five-browser cap. -->
         <profile>
+            <id>cleanup</id>
+            <properties>
+                <cucumber.tags>@module-cleanup</cucumber.tags>
+            </properties>
+        </profile>
+        <profile>
             <id>sandbox-parallel</id>
             <properties>
                 <suiteXmlFile>testng-sandbox-parallel.xml</suiteXmlFile>
-                <cucumber.tags>not @skip and not @sandbox-cleanup</cucumber.tags>
+                <cucumber.features>src/test/resources/features/sandbox.feature</cucumber.features>
+                <cucumber.tags>not @skip and not @sandbox-cleanup and not @module-cleanup</cucumber.tags>
                 <headless>true</headless>
                 <slowmo>0</slowmo>
                 <sandbox.parallel>true</sandbox.parallel>
+                <parallel.browsers>5</parallel.browsers>
+            </properties>
+        </profile>
+        <!-- 8 concurrent scenarios, one browser each. Declared LAST so its suiteXmlFile wins over
+             single-feature (auto-activated by -Dcucumber.features). Headed: add -Dheadless=false. -->
+        <profile>
+            <id>parallel</id>
+            <properties>
+                <suiteXmlFile>testng-parallel.xml</suiteXmlFile>
+                <headless>true</headless>
+                <slowmo>0</slowmo>
+                <sandbox.parallel>true</sandbox.parallel>
+                <parallel.browsers>8</parallel.browsers>
+            </properties>
+        </profile>
+        <!-- Difficulty module: one scenario at a time (shared Cloud Server admin config). Do NOT use testng-parallel5.xml here. -->
+        <profile>
+            <id>dlc-serial</id>
+            <properties>
+                <suiteXmlFile>testng-dlc-serial.xml</suiteXmlFile>
+                <cucumber.features>src/test/resources/features/difficulty_level_configuration.feature</cucumber.features>
+                <cucumber.tags>@dlc</cucumber.tags>
+                <headless>true</headless>
+                <slowmo>0</slowmo>
+                <sandbox.parallel>true</sandbox.parallel>
+                <parallel.browsers>1</parallel.browsers>
             </properties>
         </profile>
     </profiles>

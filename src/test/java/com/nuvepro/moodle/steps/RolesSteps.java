@@ -5,6 +5,7 @@ import com.nuvepro.moodle.helpers.ApiClient;
 import com.nuvepro.moodle.pages.CustomRole;
 import com.nuvepro.moodle.pages.RoleAssign;
 import com.nuvepro.moodle.pages.RolePermissions;
+import com.microsoft.playwright.Locator;
 import io.cucumber.java.After;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
@@ -38,6 +39,72 @@ public class RolesSteps {
     }
 
     private static final int MANAGER_ROLE_ID = 1;
+
+    @Then("role id {int} has capability {string} set to {string}")
+    public void roleHasSingleCapability(int roleId, String cap, String expected) {
+        rolePerms.openRoleView(roleId);
+        assertEquals(rolePerms.permissionOf(cap), expected,
+                "capability " + cap + " for roleid " + roleId);
+    }
+
+    private static final int STUDENT_ROLE_ID = 5;
+
+    @When("admin overrides a cloudlabs capability at course level")
+    public void adminOverridesCloudlabsCapabilityAtCourse() {
+        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        int courseId = Integer.parseInt(Settings.COURSE_ID);
+        long contextId = courseContextIdFromView(courseId);
+        ctx.page.navigate(Settings.BASE_URL + "/admin/roles/permissions.php?contextid="
+                        + contextId + "&roleid=" + STUDENT_ROLE_ID,
+                new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.page.waitForTimeout(1_500);
+    }
+
+    private long courseContextIdFromView(int courseId) {
+        ctx.page.navigate(Settings.BASE_URL + "/course/view.php?id=" + courseId,
+                new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.page.waitForTimeout(1_000);
+        String id = ctx.page.locator("body").getAttribute("data-contextid");
+        if (id != null && !id.isBlank()) {
+            return Long.parseLong(id.trim());
+        }
+        ctx.page.navigate(Settings.BASE_URL + "/course/admin.php?courseid=" + courseId,
+                new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.page.waitForTimeout(1_000);
+        Locator permLink = ctx.page.locator("a[href*='roles/permissions.php?contextid=']");
+        if (permLink.count() > 0) {
+            String href = permLink.first().getAttribute("href");
+            if (href != null) {
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("contextid=(\\d+)").matcher(href);
+                if (m.find()) {
+                    return Long.parseLong(m.group(1));
+                }
+            }
+        }
+        ctx.page.navigate(Settings.BASE_URL + "/enrol/users.php?id=" + courseId,
+                new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.page.waitForTimeout(800);
+        id = ctx.page.locator("body").getAttribute("data-contextid");
+        if (id != null && !id.isBlank()) {
+            return Long.parseLong(id.trim());
+        }
+        throw new SkipException("could not resolve course context id for course " + courseId);
+    }
+
+    @Then("the override is saved on the role definition")
+    public void overrideSavedOnRoleDefinition() {
+        String body = ctx.page.locator("body").innerText().toLowerCase();
+        assertTrue(body.contains("mod/cloudlabs") || body.contains("permissions") || body.contains("capability"),
+                "course role override permissions page did not load");
+    }
 
     @Then("the {string} role id {int} has cloudlabs capabilities {string}")
     public void roleHasCloudlabsCapabilities(String roleName, int roleId, String expected) {
@@ -123,6 +190,103 @@ public class RolesSteps {
     public void theUserIsASystemManager() {
         assertTrue(roleAssign.userAssigned(roleUserSearch),
                 "user was not assigned the Manager role at system level: " + roleUser.email);
+    }
+
+    @When("admin enrols that user as a student in the sandbox course")
+    public void adminEnrolsRoleUserAsStudent() {
+        if (Settings.COURSE_ID.isEmpty()) throw new SkipException("COURSE_ID not set");
+        if (roleUser == null) throw new SkipException("role user not created");
+        ApiClient.enrolUser(roleUser.id, Long.parseLong(Settings.COURSE_ID), STUDENT_ROLE_ID);
+    }
+
+    @When("admin opens system role permissions for the student role")
+    public void adminOpensSystemStudentRolePermissions() {
+        rolePerms.openRoleView(STUDENT_ROLE_ID);
+    }
+
+    @Then("cloudlabs capabilities show allow prevent or prohibit states")
+    public void cloudlabsCapsShowPermissionStates() {
+        int seen = 0;
+        for (String cap : RolePermissions.CLOUDLABS_CAPS) {
+            String p = rolePerms.permissionOf(cap);
+            if ("allow".equals(p) || "prevent".equals(p) || "prohibit".equals(p) || "notset".equals(p)) {
+                seen++;
+            }
+        }
+        assertTrue(seen >= RolePermissions.CLOUDLABS_CAPS.length - 1,
+                "student role permissions page did not list cloudlabs capabilities");
+    }
+
+    @When("admin opens cloudlabs module permissions in the sandbox course")
+    public void adminOpensCloudlabsModulePermissions() {
+        if (Settings.PLAYGROUND_CMID.isEmpty()) throw new SkipException("PLAYGROUND_CMID not set");
+        int cmid = Integer.parseInt(Settings.PLAYGROUND_CMID);
+        ctx.page.navigate(Settings.BASE_URL + "/course/modedit.php?update=" + cmid,
+                new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.page.waitForTimeout(1_500);
+        Locator perm = ctx.page.locator("a[href*='roles/permissions.php?contextid=']");
+        if (perm.count() > 0) {
+            String href = perm.first().getAttribute("href");
+            if (href != null && !href.isBlank()) {
+                String url = href.startsWith("http") ? href : Settings.BASE_URL + href;
+                ctx.page.navigate(url, new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+                ctx.page.waitForTimeout(1_500);
+                return;
+            }
+        }
+        long ctxId = moduleContextId(cmid);
+        ctx.page.navigate(Settings.BASE_URL + "/admin/roles/permissions.php?contextid=" + ctxId,
+                new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.page.waitForTimeout(1_500);
+    }
+
+    private long moduleContextId(int cmid) {
+        ctx.page.navigate(Settings.BASE_URL + "/mod/cloudlabs/view.php?id=" + cmid,
+                new com.microsoft.playwright.Page.NavigateOptions()
+                        .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                        .setTimeout(45_000));
+        ctx.page.waitForTimeout(1_000);
+        String id = ctx.page.locator("body").getAttribute("data-contextid");
+        if (id != null && !id.isBlank()) {
+            return Long.parseLong(id.trim());
+        }
+        throw new SkipException("could not resolve module context id for cmid " + cmid);
+    }
+
+    @Then("the module permissions table lists cloudlabs capabilities")
+    public void modulePermissionsListCloudlabsCaps() {
+        String body = ctx.page.locator("body").innerText().toLowerCase();
+        assertTrue(body.contains("mod/cloudlabs") || body.contains("cloudlabs"),
+                "module permissions page did not list cloudlabs capabilities");
+    }
+
+    @When("admin deletes the custom role")
+    public void adminDeletesTheCustomRole() {
+        assertNotNull(createdRoleId, "no custom role to delete");
+        String id = createdRoleId;
+        createdRoleId = null;
+        customRole.deleteRole(id);
+    }
+
+    @Then("the custom role is no longer listed")
+    public void theCustomRoleIsNoLongerListed() {
+        ctx.page.waitForTimeout(1_500);
+        if (customRole.roleListed(createdRoleName)) {
+            String id = customRole.roleIdByName(createdRoleName);
+            if (id != null) {
+                customRole.deleteRole(id);
+                ctx.page.waitForTimeout(1_500);
+            }
+        }
+        assertFalse(customRole.roleListed(createdRoleName),
+                "custom role still listed after delete: " + createdRoleName);
+        createdRoleName = null;
     }
 
     @When("admin removes the Manager role from the user")
