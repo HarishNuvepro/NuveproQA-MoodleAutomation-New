@@ -621,7 +621,6 @@ def write_next_automation_section(metrics: dict) -> list[str]:
         "| Moodle_Logs | 14 | 36 | Audit log UI |",
         "| Activities | 13 | 54 | **67** pending total — large, start High rows only |",
         "| Raven360_AWS_Content | 9 | 20 | Content integration |",
-        "| Sequential_Activity_Completion | 8 | — | `sequential_completion.feature` exists (partial orphan tags) |",
         "",
         "**Do not start yet (per project lock):** platform / Composition / VM **variants** of "
         "playground lab-action cases until Account template set is complete (`TODO.md`).",
